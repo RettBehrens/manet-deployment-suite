@@ -3,7 +3,6 @@
 ## Table of Contents
 - [Introduction](#introduction)
 - [What is a MANET?](#what-is-a-manet)
-- [Why Use This Guide?](#why-use-this-guide)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
@@ -53,9 +52,9 @@ Common applications include:
 ### Hardware Requirements
 - **Minimum**:
   - Single-board computer (Raspberry Pi, Libre Computer, etc.)
-  - WiFi adapter supporting ad-hoc mode
+  - WiFi adapter that supports ad-hoc mode (check with "iw list" look for IBSS mode)
   - Power supply
-  - SD card/storage
+  - SD card/storage (eMMC is highly reccomended over an SD card)
 
 ### Software Requirements
 - Debian-based Linux distribution (Debian, Ubuntu, Raspberry Pi OS)
@@ -315,71 +314,6 @@ dmesg | grep batman  # Kernel messages
 sudo sysctl -a | grep batman  # Kernel parameters
 ```
 
-## Advanced Topics
-
-### Custom Gateway Selection
-Gateway selection process:
-1. Checks ARP cache for potential gateways
-2. Verifies gateway status using batman-adv
-3. Tests connectivity before configuring routes
-4. Monitors gateway health and performs failover
-
-### High Availability Setup
-For critical deployments:
-1. Configure multiple gateway nodes
-2. Set up redundant paths
-3. Implement monitoring and alerting
-4. Use automatic failover
-
-### Performance Tuning
-```bash
-# Optimize batman-adv parameters
-sudo batctl hardif $MESH_INTERFACE gw_mode client
-sudo batctl hardif $MESH_INTERFACE orig_interval 1000
-sudo batctl hardif $MESH_INTERFACE hop_penalty 15
-```
-
-## References
-
-- [Batman-adv Documentation](https://www.open-mesh.org/projects/batman-adv/wiki)
-- [Linux Wireless](https://wireless.wiki.kernel.org/)
-- [Netfilter/iptables](https://netfilter.org/documentation/)
-- [IEEE 802.11s Mesh Networking](https://ieeexplore.ieee.org/document/5167291)
-
-## Monitoring and Maintenance
-
-### Log Monitoring
-Regular log monitoring is essential for maintaining mesh network health:
-
-1. **Automated Log Checking**:
-   ```bash
-   # Create a simple log monitor
-   watch -n 10 'tail -n 20 /var/log/mesh-network.log'
-   
-   # Monitor specific events
-   tail -f /var/log/mesh-network.log | grep --color=auto -E 'error|warning|gateway|route'
-   ```
-
-2. **Log Rotation**:
-   The service automatically rotates logs to prevent disk space issues. Old logs are stored as:
-   ```
-   /var/log/mesh-network.log.1
-   /var/log/mesh-network.log.2.gz
-   /var/log/mesh-network.log.3.gz
-   ```
-
-3. **Log Analysis Tools**:
-   ```bash
-   # Count occurrences of specific events
-   grep -c "gateway" /var/log/mesh-network.log
-   
-   # View unique gateway IPs
-   grep "gateway" /var/log/mesh-network.log | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | sort -u
-   
-   # Check for common errors
-   grep -i error /var/log/mesh-network.log | sort | uniq -c
-   ```
-
 ### Performance Monitoring
 Monitor network performance using various tools:
 
@@ -411,11 +345,69 @@ Monitor network performance using various tools:
    ```bash
    # View originator table
    sudo batctl o
-   
-   # Check translation table
-   sudo batctl t
-   
-   # Monitor debug log
-   sudo batctl d
    ```
+
+## Advanced Topics
+
+### Custom Gateway Selection
+Gateway selection process:
+1. Checks ARP cache for potential gateways
+2. Verifies gateway status using batman-adv
+3. Tests connectivity before configuring routes
+4. Monitors gateway health and performs failover
+
+### High Availability Setup
+For critical deployments:
+1. Configure multiple gateway nodes
+2. Set up redundant paths
+3. Implement monitoring and alerting
+4. Use automatic failover
+
+### Performance Tuning
+```bash
+# Optimize batman-adv parameters
+sudo batctl hardif $MESH_INTERFACE gw_mode client
+sudo batctl hardif $MESH_INTERFACE orig_interval 1000
+sudo batctl hardif $MESH_INTERFACE hop_penalty 15
+```
+
+## Monitoring and Maintenance
+
+### Log Monitoring
+
+   ```bash
+   # Check logs
+   tail -n 20 /var/log/mesh-network.log
+   
+   # Monitor specific events
+   tail -f /var/log/mesh-network.log | grep --color=auto -E 'error|warning|gateway|route'
+   ```
+
+2. **Log Rotation**:
+   The service automatically rotates logs to prevent disk space issues. Old logs are stored as:
+   ```
+   /var/log/mesh-network.log.1
+   /var/log/mesh-network.log.2.gz
+   /var/log/mesh-network.log.3.gz
+   ```
+
+3. **Log Analysis Tools**:
+   ```bash
+   # Count occurrences of specific events
+   grep -c "gateway" /var/log/mesh-network.log
+   
+   # View unique gateway IPs
+   grep "gateway" /var/log/mesh-network.log | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | sort -u
+   
+   # Check for common errors
+   grep -i error /var/log/mesh-network.log | sort | uniq -c
+   ```
+
+## References
+
+- [Batman-adv Documentation](https://www.open-mesh.org/projects/batman-adv/wiki)
+- [Linux Wireless](https://wireless.wiki.kernel.org/)
+- [Netfilter/iptables](https://netfilter.org/documentation/)
+- [IEEE 802.11s Mesh Networking](https://ieeexplore.ieee.org/document/5167291)
+
 

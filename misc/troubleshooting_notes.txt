@@ -1,3 +1,16 @@
+###########################
+~~~Note from author~~~
+###########################
+
+This file was created for my own reference as I was developing/troubleshooting this project. If you run into any issues, check here to see if there's a solution. 
+When I start the final release phase, I will try to incorporate all of the solutions into the readme or hopefully render them into an non-issue by design. 
+Until then, I hope it serves as a helpful resource to anyone having trouble. If you run into any issues you can't solve, don't hesitate to reach out to me directly. Discord @ifhoncho
+
+Best,
+ ifHoncho
+
+###########################
+
 problem: commands like ifconfig, iwconfig aren't working
 solution: link sbin to path. add the following to .bashrc: export PATH=$PATH:/sbin:/usr/sbin
 
