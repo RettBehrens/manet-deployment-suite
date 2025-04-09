@@ -21,19 +21,19 @@ The MANET Deployment Suite is a comprehensive toolkit for deploying resilient, s
 
 This suite simplifies the deployment process with:
 
-- **Zero-configuration IP networking** - Automatically establishes and maintains layer 3 connectivity over batman-adv mesh
+- **Simplified IP networking** - Maintains layer 3 connectivity over batman-adv mesh after initial configuration
 - **Intelligent gateway management** - Continuously discovers, validates, and selects optimal internet gateways
 - **Seamless failover** - Maintains network connectivity during gateway or node failures
 - **Flexible deployment options** - Supports various topologies from simple meshes to complex multi-gateway configurations
 - **Real-time adaptation** - Responds to changing network conditions by updating routing tables automatically
 
-Once installed, the `mesh-network.service` handles the complex tasks of managing gateway selection, routing configuration, and network monitoring without manual intervention, ensuring maximum network availability and performance.
+Once configured and installed, the `mesh-network.service` handles the tasks of managing gateway selection, routing configuration, and network monitoring with minimal intervention, ensuring maximum network availability.
 
 The system seamlessly bridges meshes with external networks, enabling internet access across the entire mesh and integration with existing infrastructure like TAK servers or other communication systems.
 
 ### Key Features
-- Run an IP layer on batman-adv without manual configuration
-- Automatic gateway detection and configuration
+- Maintain an IP layer on batman-adv with minimal ongoing configuration
+- Automatic gateway detection and selection after initial setup
 - Seamless failover between gateways
 - Support for multiple network topologies
 - Integrated monitoring and maintenance tools
