@@ -17,9 +17,19 @@
 
 ## Introduction
 
-The B.A.T.M.A.N. advanced (batman-adv) is a layer 2 routing protocol implemented as a Linux kernel module, designed specifically for mobile ad-hoc networks. This repository provides a comprehensive suite of tools and configurations to simplify the deployment and management of batman-adv networks.
+The MANET Deployment Suite is a comprehensive toolkit for deploying resilient, self-healing wireless mesh networks using B.A.T.M.A.N. advanced (batman-adv) - a layer 2 routing protocol implemented as a Linux kernel module specifically designed for mobile ad-hoc networks.
 
-This tool allows users to start at a point where layer 3/IP networking is already configured. From here, users can provide full internet access to their mesh, remote meshes can be bridged with other meshes, TAK infrastructure, etc. The sky is the limit!
+This suite simplifies the deployment process with:
+
+- **Zero-configuration IP networking** - Automatically establishes and maintains layer 3 connectivity over batman-adv mesh
+- **Intelligent gateway management** - Continuously discovers, validates, and selects optimal internet gateways
+- **Seamless failover** - Maintains network connectivity during gateway or node failures
+- **Flexible deployment options** - Supports various topologies from simple meshes to complex multi-gateway configurations
+- **Real-time adaptation** - Responds to changing network conditions by updating routing tables automatically
+
+Once installed, the `mesh-network.service` handles the complex tasks of managing gateway selection, routing configuration, and network monitoring without manual intervention, ensuring maximum network availability and performance.
+
+The system seamlessly bridges meshes with external networks, enabling internet access across the entire mesh and integration with existing infrastructure like TAK servers or other communication systems.
 
 ### Key Features
 - Run an IP layer on batman-adv without manual configuration
