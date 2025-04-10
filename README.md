@@ -418,6 +418,3 @@ sudo batctl hardif $MESH_INTERFACE hop_penalty 15
 - [Batman-adv Documentation](https://www.open-mesh.org/projects/batman-adv/wiki)
 - [Linux Wireless](https://wireless.wiki.kernel.org/)
 - [Netfilter/iptables](https://netfilter.org/documentation/)
-- [IEEE 802.11s Mesh Networking](https://ieeexplore.ieee.org/document/5167291)
-
-
