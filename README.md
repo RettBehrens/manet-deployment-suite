@@ -355,9 +355,21 @@ Monitor network performance using various tools:
 
 ## Security Considerations
 
-It is important to note that this is not a secure implementation. This project is still in its infancy, speed of development and ease of install has been prioritized over ground up security. At its default state, it relies solely on obscurity. You need to assume that every node on your mesh could be malicious and that all traffic will be clearly visible to anyone in proximity who wants to view it.
+It is important to note that <u>this is not a secure implementation.</u> This project is still in its infancy, speed of development and ease of install has been prioritized over ground up security. At its default state, it relies solely on obscurity. You need to assume that every node on your mesh could be malicious and that all traffic will be clearly visible to anyone in proximity who wants to view it.
 
-For deployments handling sensitive data, I recommend implementing a Peer-to-Peer (P2P) VPN overlay on top of the batman-adv mesh. tincVPN seems to be the best option for this. This approach creates a decentralized, encrypted layer 2 overlay that avoids a central point of failure. You will need to establish a chain of trust and create/distribute unique certificates for each node. I'm currently testing and refining this approach, future releases will eventually include a streamlined implementation of this process, but for now, it will require you to get your hands dirty.
+For deployments handling sensitive data, I recommend implementing a Peer-to-Peer (P2P) VPN overlay on top of the batman-adv mesh. tincVPN seems to be the best option for this. I'm currently testing and refining this approach, future releases will eventually include a streamlined implementation of this process, but for now, it will require you to get your hands dirty. You'll need to manually configure each node with its own cryptographic key pair, share public keys securely between peers, and ensure that Tinc is only communicating over the BATMAN-adv interface. This setup will encrypt all inter-node traffic at the VPN layer, preventing eavesdropping or tampering by untrusted nodes within RF range or on the mesh.
+
+Keep in mind that Tinc's default behavior still requires some level of trust between peers, as it doesn't include a full public key infrastructure (PKI) or revocation mechanism out of the box. To mitigate this, maintain strict control over which keys are accepted and monitor the mesh for rogue peers. You can automate this process with scripts or configuration management tools, but it's important to understand the trust relationships you're establishing. This goes a bit outside the scope of what I'm aiming to do with this project right now, but it will slowly develop over time as I experiment and learn more about an optimal way to integrate it into this project.
+
+Ideally, future versions of this project will aim to include:
+
+    Encrypted and authenticated peer discovery
+
+    Automatic key distribution and rotation
+
+    Optional integration with distributed identity or trust frameworks
+
+Until then, you'll need to implement this yourself.
 
 ## Monitoring and Maintenance
 
