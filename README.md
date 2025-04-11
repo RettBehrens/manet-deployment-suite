@@ -113,16 +113,16 @@ sudo ./setup.sh
 
 2. Copy and edit configuration:
    ```bash
-   sudo cp config_tools/mesh-config.conf /etc/mesh-network/mesh-config.conf
+   sudo cp mesh_tools/mesh-config.conf /etc/mesh-network/mesh-config.conf
    sudo nano /etc/mesh-network/mesh-config.conf
    ```
 
 ### 3. Service Installation
 ```bash
 # Install service files
-sudo cp config_tools/mesh-network.service /etc/systemd/system/
-sudo cp config_tools/mesh-network.sh /usr/sbin/
-sudo cp config_tools/mesh-network-stop.sh /usr/sbin/
+sudo cp mesh_tools/mesh-network.service /etc/systemd/system/
+sudo cp mesh_tools/mesh-network.sh /usr/sbin/
+sudo cp mesh_tools/mesh-network-stop.sh /usr/sbin/
 
 # Set permissions
 sudo chmod +x /usr/sbin/mesh-network.sh

@@ -10,10 +10,10 @@ fi
 mkdir -p /etc/mesh-network
 
 # Copy configuration files
-cp config_tools/mesh-config.conf /etc/mesh-network/
-cp config_tools/mesh-network.service /etc/systemd/system/
-cp config_tools/mesh-network.sh /usr/sbin/
-cp config_tools/mesh-network-stop.sh /usr/sbin/
+cp mesh_tools/mesh-config.conf /etc/mesh-network/
+cp mesh_tools/mesh-network.service /etc/systemd/system/
+cp mesh_tools/mesh-network.sh /usr/sbin/
+cp mesh_tools/mesh-network-stop.sh /usr/sbin/
 
 # Set permissions
 chmod 644 /etc/systemd/system/mesh-network.service
