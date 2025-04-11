@@ -6,13 +6,10 @@
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
-- [Node Configuration Types](#node-configuration-types)
 - [Service Operation](#service-operation)
 - [Troubleshooting](#troubleshooting)
-- [Performance Optimization](#performance-optimization)
 - [Security Considerations](#security-considerations)
 - [Monitoring and Maintenance](#monitoring-and-maintenance)
-- [Advanced Topics](#advanced-topics)
 - [References](#references)
 
 ## Introduction
@@ -37,7 +34,6 @@ The system seamlessly bridges meshes with external networks, enabling internet a
 - Seamless failover between gateways
 - Support for multiple network topologies
 - Integrated monitoring and maintenance tools
-- Secure by default configuration
 
 ## What is a MANET?
 
@@ -64,7 +60,7 @@ Common applications include:
   - Single-board computer (Raspberry Pi, Libre Computer, etc.)
   - WiFi adapter that supports ad-hoc mode (check with "iw list" look for IBSS mode)
   - Power supply
-  - SD card/storage (eMMC is highly reccomended over an SD card)
+  - SD card/storage (eMMC is highly recommended over an SD card)
 
 ### Software Requirements
 - Debian-based Linux distribution (Debian, Ubuntu, Raspberry Pi OS)
@@ -357,37 +353,19 @@ Monitor network performance using various tools:
    sudo batctl o
    ```
 
-## Advanced Topics
+## Security Considerations
 
-### Custom Gateway Selection
-Gateway selection process:
-1. Checks ARP cache for potential gateways
-2. Verifies gateway status using batman-adv
-3. Tests connectivity before configuring routes
-4. Monitors gateway health and performs failover
+It is important to note that this is not a secure implementation. This project is still in its infancy, speed of development and ease of install has been prioritized over ground up security. At its default state, it relies solely on obscurity. You need to assume that every node on your mesh could be malicious and that all traffic will be clearly visible to anyone in proximity who wants to view it.
 
-### High Availability Setup
-For critical deployments:
-1. Configure multiple gateway nodes
-2. Set up redundant paths
-3. Implement monitoring and alerting
-4. Use automatic failover
-
-### Performance Tuning
-```bash
-# Optimize batman-adv parameters
-sudo batctl hardif $MESH_INTERFACE gw_mode client
-sudo batctl hardif $MESH_INTERFACE orig_interval 1000
-sudo batctl hardif $MESH_INTERFACE hop_penalty 15
-```
+For deployments handling sensitive data, I recommend implementing a Peer-to-Peer (P2P) VPN overlay on top of the batman-adv mesh. SoftEther seems to be the best option for this. This approach creates a decentralized, encrypted layer 2 overlay that avoids a central point of failure. You will need to establish a chain of trust and create/distribute unique certificates for each node. I'm currently testing and refining this approach, future releases will eventually include a streamlined implementation of this process, but for now, it will require you to get your hands dirty.
 
 ## Monitoring and Maintenance
 
 ### Log Monitoring
-
+1. **Viewing Logs**:
    ```bash
    # Check logs
-   tail -n 20 /var/log/mesh-network.log
+   tail /var/log/mesh-network.log
    
    # Monitor specific events
    tail -f /var/log/mesh-network.log | grep --color=auto -E 'error|warning|gateway|route'
