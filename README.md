@@ -357,7 +357,7 @@ Monitor network performance using various tools:
 
 It is important to note that this is not a secure implementation. This project is still in its infancy, speed of development and ease of install has been prioritized over ground up security. At its default state, it relies solely on obscurity. You need to assume that every node on your mesh could be malicious and that all traffic will be clearly visible to anyone in proximity who wants to view it.
 
-For deployments handling sensitive data, I recommend implementing a Peer-to-Peer (P2P) VPN overlay on top of the batman-adv mesh. SoftEther seems to be the best option for this. This approach creates a decentralized, encrypted layer 2 overlay that avoids a central point of failure. You will need to establish a chain of trust and create/distribute unique certificates for each node. I'm currently testing and refining this approach, future releases will eventually include a streamlined implementation of this process, but for now, it will require you to get your hands dirty.
+For deployments handling sensitive data, I recommend implementing a Peer-to-Peer (P2P) VPN overlay on top of the batman-adv mesh. tincVPN seems to be the best option for this. This approach creates a decentralized, encrypted layer 2 overlay that avoids a central point of failure. You will need to establish a chain of trust and create/distribute unique certificates for each node. I'm currently testing and refining this approach, future releases will eventually include a streamlined implementation of this process, but for now, it will require you to get your hands dirty.
 
 ## Monitoring and Maintenance
 
