@@ -119,16 +119,16 @@ sudo ./setup.sh
 
 ### 3. Service Installation
 ```bash
-# Install service files
+# Install service files (skip this step if you ran setup.sh)
 sudo cp mesh_tools/mesh-network.service /etc/systemd/system/
 sudo cp mesh_tools/mesh-network.sh /usr/sbin/
 sudo cp mesh_tools/mesh-network-stop.sh /usr/sbin/
 
-# Set permissions
+# Set permissions (skip this step if you ran setup.sh)
 sudo chmod +x /usr/sbin/mesh-network.sh
 sudo chmod +x /usr/sbin/mesh-network-stop.sh
 
-# Enable and start service
+# Enable and start service (configure the mesh before running this, see below)
 sudo systemctl daemon-reload
 sudo systemctl enable mesh-network.service
 sudo systemctl start mesh-network.service
