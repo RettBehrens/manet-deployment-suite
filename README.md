@@ -105,7 +105,7 @@ cd manet-deployment-suite
 sudo ./setup.sh
 ```
 
-### 2. Initial Configuration (setup.sh does this automatically, skip to configuration)
+### 2. Initial Configuration (setup.sh does this automatically, skip to [Configuration](#configuration))
 1. Create configuration directory:
    ```bash
    sudo mkdir -p /etc/mesh-network
