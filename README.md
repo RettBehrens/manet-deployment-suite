@@ -23,6 +23,7 @@ This suite simplifies the deployment process with:
 - **Seamless failover** - Maintains network connectivity during gateway or node failures
 - **Flexible deployment options** - Supports various topologies from simple meshes to complex multi-gateway configurations
 - **Real-time adaptation** - Responds to changing network conditions by updating routing tables automatically
+- **Enhanced node tracking** - Persistent translation table for reliable node identification and addressing
 
 Once configured and installed, the `mesh-network.service` handles the tasks of managing gateway selection, routing configuration, and network monitoring with minimal intervention, ensuring maximum network availability.
 
@@ -34,6 +35,7 @@ The system seamlessly bridges meshes with external networks, enabling internet a
 - Seamless failover between gateways
 - Support for multiple network topologies
 - Integrated monitoring and maintenance tools
+- Persistent node tracking with translation table functionality
 
 ## What is a MANET?
 
@@ -95,7 +97,7 @@ Before deployment, consider:
 sudo apt update && sudo apt upgrade -y
 
 # Install dependencies
-sudo apt install -y git batctl iw wireless-tools net-tools bridge-utils iptables dnsmasq hostapd arping
+sudo apt install -y git batctl iw wireless-tools net-tools bridge-utils iptables dnsmasq hostapd arping arp-scan
 
 # Clone repository
 git clone https://github.com/ifHoncho/mobile-ad-hoc-deployment-suite.git
@@ -142,20 +144,22 @@ Minimum required settings in `/etc/mesh-network/mesh-config.conf`:
 
 ```bash
 # Interface Configuration
-MESH_INTERFACE=wlan0          # Primary mesh interface
-NODE_IP=10.0.0.x             # Node IP (must be valid IPv4 format)
-MESH_NETMASK=24              # Network mask (e.g., 16 for /16)
-GATEWAY_IP=10.0.0.1          # Gateway IP (must be valid IPv4 format)
+MESH_IFACE=wlan0          # Primary mesh interface
+
+# IP Configuration
+NODE_IP=10.0.0.x          # Node IP (must be unique on the network)
+MESH_NETMASK=24           # Network mask (e.g., 24 for /24)
+DNS_SERVERS=9.9.9.9,8.8.8.8  # DNS servers to use
 
 # Mesh Parameters
-MESH_MODE=ad-hoc             # Must be set to ad-hoc
-MESH_ESSID=mesh-network      # Network name (same for all nodes)
-MESH_CHANNEL=1               # WiFi channel (1, 6, or 11)
+MESH_MODE=ad-hoc          # Must be set to ad-hoc
+MESH_ESSID=mesh-network   # Network name (same for all nodes)
+MESH_CHANNEL=1            # WiFi channel (1-13, depending on region)
 MESH_CELL_ID=02:12:34:56:78:9A  # Cell ID (same for all nodes)
 
 # Batman-adv Settings
-BATMAN_GW_MODE=client        # client, server, or off
-BATMAN_ROUTING_ALGORITHM=BATMAN_V  # Must be BATMAN_IV or BATMAN_V
+BATMAN_GW_MODE=client     # client for regular nodes, server for internet gateways
+BATMAN_ROUTING_ALGORITHM=BATMAN_V  # BATMAN_IV or BATMAN_V
 ```
 
 ### Advanced Configuration
@@ -163,20 +167,39 @@ Optional settings for enhanced functionality:
 
 ```bash
 # Additional Interface Options
-AP_IFACE=wlan1              # Access point interface
-WAN_IFACE=wlan2             # Wireless WAN interface
-ETH_WAN=eth0                # Ethernet WAN interface
-ETH_LAN=eth1                # Ethernet LAN interface
+WAP_IFACE=wlan1          # Access point interface for client devices
+WAN_IFACE=wlan2          # Wireless WAN interface (for specialized setups)
+ETH_WAN=eth0             # Ethernet WAN interface (internet connection)
+ETH_LAN=eth1             # Ethernet LAN interface
+
+# Additional IP Configuration
+WAP_IP=10.10.0.1         # IP for wireless access point interface
+ETH_LAN_IP=10.10.0.2     # IP for ethernet LAN interface
 
 # Performance Tuning
-MESH_MTU=1500               # MTU size for mesh interface
-BATMAN_ORIG_INTERVAL=1000   # Originator interval (ms)
-BATMAN_HOP_PENALTY=30       # Hop penalty
-BATMAN_LOG_LEVEL=batman     # Logging level
-
-# Routing Options
-ENABLE_ROUTING=1            # Enable routing/NAT
+MESH_MTU=1500            # MTU size for mesh interface
+BATMAN_ORIG_INTERVAL=1000  # Originator interval (ms)
+BATMAN_HOP_PENALTY=30    # Hop penalty
+BATMAN_LOG_LEVEL=batman  # Logging level
 ```
+
+### Hardware Interface Management
+
+It's highly recommended to match interface names to hardware addresses to prevent changes after reboot:
+
+```bash
+# Create a file like /etc/systemd/network/10-wlan0.link:
+[Match]
+MACAddress=xx:xx:xx:xx:xx:xx
+[Link]
+Name=wlan0
+```
+
+### Network Planning
+For optimal performance, consider:
+1. Each node should have a unique IP address (e.g., follow pattern 10.0.0.x for nodes)
+2. Creating an `/etc/bat-hosts` file with numerical hostnames for easy reference
+3. Access point and LAN networks should use separate subnets (e.g., 10.x0.0.x)
 
 ## Service Operation
 
@@ -199,14 +222,14 @@ The service maintains detailed logs in multiple locations:
 1. **Main Service Log**:
    ```bash
    # View mesh network service log
-   tail -f /var/log/mesh-network.log
+   tail -f /var/log/mesh-network/mesh-network.log
    
    # View last 100 lines with timestamps
-   tail -n 100 /var/log/mesh-network.log
+   tail -n 100 /var/log/mesh-network/mesh-network.log
    
    # Search for specific events
-   grep "gateway" /var/log/mesh-network.log
-   grep "error" /var/log/mesh-network.log
+   grep "gateway" /var/log/mesh-network/mesh-network.log
+   grep "error" /var/log/mesh-network/mesh-network.log
    ```
 
 2. **Systemd Journal**:
@@ -264,10 +287,10 @@ Important log entries to watch for:
    
    # View detailed logs
    sudo journalctl -u mesh-network.service -f
-   tail -f /var/log/mesh-network.log
+   tail -f /var/log/mesh-network/mesh-network.log
    
    # Check for errors in system log
-   grep -i error /var/log/mesh-network.log
+   grep -i error /var/log/mesh-network/mesh-network.log
    ```
 
 2. **No Gateway Connection**
@@ -282,7 +305,10 @@ Important log entries to watch for:
    sudo batctl ping <gateway-ip>
    
    # Check gateway detection logs
-   tail -f /var/log/mesh-network.log | grep -E "gateway|route"
+   tail -f /var/log/mesh-network/mesh-network.log | grep -E "gateway|route"
+   
+   # Check translation table entries
+   cat /var/lib/batman-adv/translation_table.db
    ```
 
 3. **Interface Problems**
@@ -298,13 +324,13 @@ Important log entries to watch for:
    batctl if
    
    # Monitor interface-related logs
-   tail -f /var/log/mesh-network.log | grep -E "interface|wlan"
+   tail -f /var/log/mesh-network/mesh-network.log | grep -E "interface|wlan"
    ```
 
 ### Diagnostic Commands
 ```bash
 # Real-time log monitoring
-tail -f /var/log/mesh-network.log
+tail -f /var/log/mesh-network/mesh-network.log
 
 # Check batman-adv status
 sudo batctl o         # Originator table
@@ -319,6 +345,9 @@ sudo iftop -i bat0   # Network traffic
 # System checks
 dmesg | grep batman  # Kernel messages
 sudo sysctl -a | grep batman  # Kernel parameters
+
+# Translation table management
+cat /var/lib/batman-adv/translation_table.db  # View current table entries
 ```
 
 ### Performance Monitoring
@@ -342,7 +371,7 @@ Monitor network performance using various tools:
    ip route show | grep default
    
    # Monitor gateway changes
-   tail -f /var/log/mesh-network.log | grep "gateway"
+   tail -f /var/log/mesh-network/mesh-network.log | grep "gateway"
    
    # View gateway list
    sudo batctl gwl
@@ -352,6 +381,9 @@ Monitor network performance using various tools:
    ```bash
    # View originator table
    sudo batctl o
+   
+   # View translation table (IP to MAC mappings)
+   cat /var/lib/batman-adv/translation_table.db
    ```
 
 ## Security Considerations
@@ -378,30 +410,38 @@ Until then, you'll need to implement this yourself.
 1. **Viewing Logs**:
    ```bash
    # Check logs
-   tail /var/log/mesh-network.log
+   tail /var/log/mesh-network/mesh-network.log
    
    # Monitor specific events
-   tail -f /var/log/mesh-network.log | grep --color=auto -E 'error|warning|gateway|route'
+   tail -f /var/log/mesh-network/mesh-network.log | grep --color=auto -E 'error|warning|gateway|route'
    ```
 
 2. **Log Rotation**:
-   The service automatically rotates logs to prevent disk space issues. Old logs are stored as:
+   The service automatically rotates logs to prevent disk space issues. Old logs are stored with timestamps in the subdirectory:
    ```
-   /var/log/mesh-network.log.1
-   /var/log/mesh-network.log.2.gz
-   /var/log/mesh-network.log.3.gz
+   /var/log/mesh-network/old/mesh-network.log.YYYYMMDD-HHMMSS
    ```
 
-3. **Log Analysis Tools**:
+3. **Translation Table**:
+   The system maintains a persistent translation table to map IP addresses to batman-adv MAC addresses:
+   ```bash
+   # View the current translation table
+   cat /var/lib/batman-adv/translation_table.db
+   
+   # Format: timestamp|ip|bat0_mac|hw_mac
+   # Entries older than 1 hour are automatically cleaned
+   ```
+
+4. **Log Analysis Tools**:
    ```bash
    # Count occurrences of specific events
-   grep -c "gateway" /var/log/mesh-network.log
+   grep -c "gateway" /var/log/mesh-network/mesh-network.log
    
    # View unique gateway IPs
-   grep "gateway" /var/log/mesh-network.log | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | sort -u
+   grep "gateway" /var/log/mesh-network/mesh-network.log | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | sort -u
    
    # Check for common errors
-   grep -i error /var/log/mesh-network.log | sort | uniq -c
+   grep -i error /var/log/mesh-network/mesh-network.log | sort | uniq -c
    ```
 
 ## References

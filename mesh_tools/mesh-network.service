@@ -1,13 +1,19 @@
 [Unit]
 Description=Mesh Network Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=/usr/sbin/mesh-network.sh service
 ExecStop=/usr/sbin/mesh-network-stop.sh
 Restart=on-failure
-RestartSec=30
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=60
+TimeoutStopSec=30
+
 StartLimitIntervalSec=300
 StartLimitBurst=3
 RemainAfterExit=yes

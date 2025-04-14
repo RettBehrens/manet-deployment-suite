@@ -3,6 +3,10 @@
 # Instead of set -e, we'll handle errors more gracefully
 set -o pipefail
 
+#######################################
+# UTILITY FUNCTIONS
+#######################################
+
 # Add timeout function
 timeout_exec() {
     local timeout=$1
@@ -14,18 +18,58 @@ timeout_exec() {
     wait $pid 2>/dev/null && pkill -HUP -P $watcher
 }
 
-# Check if running as a service
-if [ "${1}" = "service" ]; then
-    # Redirect output to log file without tee when running as a service
-    LOG_FILE="/var/log/mesh-network.log"
-    exec 1>> "${LOG_FILE}"
-    exec 2>> "${LOG_FILE}"
-else
-    # Keep the existing tee logging for interactive use
-    LOG_FILE="/var/log/mesh-network.log"
-    exec 1> >(tee -a "${LOG_FILE}")
-    exec 2>&1
-fi
+# Set up logging
+setup_logging() {
+    # Define log directories and file
+    LOG_DIR="/var/log/mesh-network"
+    LOG_OLD_DIR="${LOG_DIR}/old"
+    LOG_FILE="${LOG_DIR}/mesh-network.log"
+    
+    # Create log directories if they don't exist
+    sudo mkdir -p "${LOG_OLD_DIR}" 2>/dev/null || {
+        echo "Error: Could not create log directories"
+        exit 1
+    }
+    
+    # Ensure proper permissions on log directories
+    sudo chmod 755 "${LOG_DIR}" "${LOG_OLD_DIR}" 2>/dev/null || {
+        echo "Error: Could not set permissions on log directories"
+        exit 1
+    }
+    
+    # Rotate log file if it exists
+    if [ -f "${LOG_FILE}" ]; then
+        # Create timestamp for the backup filename
+        TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
+        # Move current log to backup with timestamp
+        mv "${LOG_FILE}" "${LOG_OLD_DIR}/mesh-network.log.${TIMESTAMP}"
+        # Log rotation message to the new file once it's created
+        ROTATION_MESSAGE="Log file rotated at $(date '+%Y-%m-%d %H:%M:%S'). Previous log saved as ${LOG_OLD_DIR}/mesh-network.log.${TIMESTAMP}"
+    fi
+    
+    # Create new log file and set permissions
+    sudo touch "${LOG_FILE}" 2>/dev/null
+    sudo chmod 644 "${LOG_FILE}" 2>/dev/null || {
+        echo "Error: Could not set permissions on log file"
+        exit 1
+    }
+    
+    # Check if running as a service
+    if [ "${1}" = "service" ]; then
+        # Redirect output to log file without tee when running as a service
+        exec 1>> "${LOG_FILE}"
+        exec 2>> "${LOG_FILE}"
+    else
+        # Keep the existing tee logging for interactive use
+        exec 1> >(tee -a "${LOG_FILE}")
+        exec 2>&1
+    fi
+    
+    # Output rotation message if we rotated the log
+    if [ -n "${ROTATION_MESSAGE}" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${ROTATION_MESSAGE}"
+    fi
+}
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
@@ -35,6 +79,10 @@ error() {
     log "ERROR: $1"
     exit 1
 }
+
+#######################################
+# TRANSLATION TABLE FUNCTIONS
+#######################################
 
 # Translation table configuration
 TRANSLATION_TABLE_FILE="/var/lib/batman-adv/translation_table.db"
@@ -119,11 +167,15 @@ clean_translation_table() {
     mv "${temp_file}" "${TRANSLATION_TABLE_FILE}"
 }
 
+#######################################
+# BATMAN MESH NETWORK FUNCTIONS
+#######################################
+
 # Function to validate configuration
 validate_config() {
     local required_vars=(
-        "MESH_INTERFACE" "MESH_MTU" "MESH_MODE" "MESH_ESSID" 
-        "MESH_CHANNEL" "MESH_CELL_ID" "NODE_IP" "GATEWAY_IP" 
+        "MESH_IFACE" "MESH_MTU" "MESH_MODE" "MESH_ESSID" 
+        "MESH_CHANNEL" "MESH_CELL_ID" "NODE_IP" 
         "MESH_NETMASK" "BATMAN_GW_MODE" "BATMAN_ROUTING_ALGORITHM"
     )
     
@@ -141,10 +193,6 @@ validate_config() {
     # Validate IP address format
     if ! [[ "${NODE_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         error "Invalid NODE_IP format: ${NODE_IP}"
-    fi
-    
-    if ! [[ "${GATEWAY_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        error "Invalid GATEWAY_IP format: ${GATEWAY_IP}"
     fi
 }
 
@@ -175,8 +223,18 @@ is_gateway_available() {
         fi
     fi
     
-    # For client mode or other gateways in server mode, check batctl gwl
-    batctl gwl -n 2>/dev/null | grep -q "^*.*${gateway_mac}"
+    # For client mode, first check for official gateways
+    if batctl gwl -n 2>/dev/null | grep -q "^*.*${gateway_mac}"; then
+        return 0  # Found in gateway list
+    fi
+    
+    # If not found in gateway list, check if it's at least in the originator table
+    # This is important for mesh nodes that aren't announcing themselves as gateways
+    if batctl o -n 2>/dev/null | grep -q "^.*${gateway_mac}"; then
+        return 0  # Found in originator table
+    fi
+    
+    return 1  # Not found anywhere
 }
 
 # Function to monitor gateway
@@ -197,7 +255,7 @@ monitor_gateway() {
     if [ -f "${TRANSLATION_TABLE_FILE}" ]; then
         while IFS='|' read -r timestamp ip bat0_mac hw_mac; do
             if [ "${ip}" = "${current_gateway}" ]; then
-                bat0_mac="${bat0_mac}"
+                # No need to reassign to itself
                 break
             fi
         done < "${TRANSLATION_TABLE_FILE}"
@@ -240,8 +298,22 @@ detect_gateway_ip() {
     gateway_macs=$(get_gateway_macs)
     
     if [ -z "${gateway_macs}" ]; then
-        log "No batman-adv gateways found" >&2
-        return 1
+        log "No batman-adv gateways found via batctl gwl" >&2
+        
+        # Try using originators if no gateways are announced
+        log "Checking for mesh originators/neighbors instead..." >&2
+        local originator_macs
+        originator_macs=$(batctl o -n 2>/dev/null | grep -v "B.A.T.M.A.N." | grep -E '^ \*' | awk '{print $2}' | grep -E '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' | sort -u)
+        
+        if [ -n "${originator_macs}" ]; then
+            log "Found mesh originator MAC(s): ${originator_macs}" >&2
+            # Use these as potential gateways - consider first originator as gateway
+            gateway_macs="${originator_macs}"
+            log "Using mesh originators as potential gateways" >&2
+        else
+            log "No mesh originators found either" >&2
+            return 1
+        fi
     fi
     
     log "Found batman-adv gateway MAC(s): ${gateway_macs}" >&2
@@ -251,6 +323,9 @@ detect_gateway_ip() {
 
     # Clean expired entries from translation table
     clean_translation_table
+    
+    # Create a list of known good gateways
+    local known_gateways=""
     
     # First try to find gateway using translation table
     for gateway_mac in ${gateway_macs}; do
@@ -269,6 +344,8 @@ detect_gateway_ip() {
                     return 0
                 else
                     log "Gateway ${ip} from translation table is no longer available" >&2
+                    # Add to known gateways for fallback
+                    known_gateways="${known_gateways} ${ip}"
                 fi
             fi
         done < "${TRANSLATION_TABLE_FILE}"
@@ -276,61 +353,110 @@ detect_gateway_ip() {
     
     log "No valid gateway found in translation table, performing network scan" >&2
     
-    # Calculate network address from NODE_IP and MESH_NETMASK
-    local network_addr="${NODE_IP%.*}.0"
-    
-    # Scan the network using arp-scan
-    log "Scanning network with arp-scan..." >&2
-    if ! command -v arp-scan >/dev/null 2>&1; then
-        log "ERROR: arp-scan is not installed" >&2
-        return 1
+    # Use cached scan results if available
+    local mesh_nodes=""
+    if [ -n "${MESH_SCAN_CACHE}" ]; then
+        log "Using cached scan results" >&2
+        mesh_nodes="${MESH_SCAN_CACHE}"
+        log "Cached mesh nodes: ${mesh_nodes}" >&2
+    else
+        # Calculate network address from NODE_IP and MESH_NETMASK
+        local network_addr="${NODE_IP%.*}.0"
+        
+        # Scan the network using arp-scan
+        log "Scanning network with arp-scan..." >&2
+        if ! command -v arp-scan >/dev/null 2>&1; then
+            log "ERROR: arp-scan is not installed" >&2
+            return 1
+        fi
+        
+        # First try a quick scan of likely addresses (first 20 IPs)
+        log "Performing quick scan of likely IPs first" >&2
+        local quick_scan_output
+        quick_scan_output=$(sudo arp-scan --interface=bat0 --retry=1 --timeout=500 "${network_addr%.*}.1-20" 2>/dev/null)
+        
+        # Extract IPs and MACs from quick scan output
+        local quick_mesh_nodes
+        quick_mesh_nodes=$(echo "${quick_scan_output}" | grep -v "Interface:" | grep -v "Starting" | grep -v "packets" | grep -v "Ending" | grep -v "WARNING")
+        
+        if [ -n "${quick_mesh_nodes}" ]; then
+            log "Quick scan found nodes: ${quick_mesh_nodes}" >&2
+            mesh_nodes="${quick_mesh_nodes}"
+        else
+            log "No nodes found in quick scan, performing full scan" >&2
+            local scan_output
+            scan_output=$(sudo arp-scan --interface=bat0 --retry=1 "${network_addr}/${MESH_NETMASK}" 2>/dev/null)
+            
+            if [ $? -ne 0 ]; then
+                log "arp-scan failed" >&2
+                return 1
+            fi
+            
+            log "arp-scan output: ${scan_output}" >&2
+            
+            # Extract IPs and MACs from scan output, skipping header and footer lines
+            mesh_nodes=$(echo "${scan_output}" | grep -v "Interface:" | grep -v "Starting" | grep -v "packets" | grep -v "Ending" | grep -v "WARNING")
+        fi
     fi
-    
-    local scan_output
-    scan_output=$(sudo arp-scan --interface=bat0 --retry=1 "${network_addr}/${MESH_NETMASK}" 2>/dev/null)
-    
-    if [ $? -ne 0 ]; then
-        log "arp-scan failed" >&2
-        return 1
-    fi
-    
-    log "arp-scan output: ${scan_output}" >&2
-    
-    # Extract IPs and MACs from scan output, skipping header and footer lines
-    local mesh_nodes
-    mesh_nodes=$(echo "${scan_output}" | grep -v "Interface:" | grep -v "Starting" | grep -v "packets" | grep -v "Ending" | grep -v "WARNING")
     
     if [ -z "${mesh_nodes}" ]; then
         log "No nodes found by arp-scan" >&2
+        # Try known gateways as a last resort if we have any
+        if [ -n "${known_gateways}" ]; then
+            log "Trying previously known gateways as last resort" >&2
+            for ip in ${known_gateways}; do
+                log "Checking if known gateway ${ip} is reachable" >&2
+                if ping -c 1 -W 1 "${ip}" >/dev/null 2>&1; then
+                    log "Known gateway ${ip} is reachable, using it" >&2
+                    echo "${ip}"
+                    return 0
+                fi
+            done
+        fi
         return 1
     fi
     
     log "Found mesh nodes: ${mesh_nodes}" >&2
     
-    # Process each discovered node
-    echo "${mesh_nodes}" | while read -r ip hw_mac _; do
-        # Skip empty lines
-        [ -z "${ip}" ] && continue
+    # Cache translation results to avoid redundant calls
+    declare -A ip_to_mac_cache
+    
+    # First try to match using originator MACs directly - faster matching
+    for gateway_mac in ${gateway_macs}; do
+        log "Looking for match with gateway MAC: ${gateway_mac}" >&2
         
-        # Skip our own IP
-        [ "${ip}" = "${NODE_IP}" ] && continue
-        
-        log "Checking IP ${ip} (MAC: ${hw_mac})" >&2
-        
-        # Get virtual MAC for this IP using batctl translate
-        local virtual_mac
-        virtual_mac=$(batctl translate "${ip}" 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
-        
-        if [ -n "${virtual_mac}" ]; then
-            log "IP ${ip} has virtual MAC: ${virtual_mac}" >&2
+        # Process each discovered node
+        while read -r ip hw_mac _; do
+            # Skip empty lines
+            [ -z "${ip}" ] && continue
             
-            # Update translation table with this mapping
-            update_translation_entry "${ip}" "${virtual_mac}" "${hw_mac}"
+            # Skip our own IP
+            [ "${ip}" = "${NODE_IP}" ] && continue
             
-            # Check if this MAC matches any of our gateways
-            for gateway_mac in ${gateway_macs}; do
+            # Get virtual MAC directly from batctl
+            local virtual_mac
+            
+            # Check if we already have this IP's virtual MAC cached
+            if [ -n "${ip_to_mac_cache[${ip}]}" ]; then
+                virtual_mac="${ip_to_mac_cache[${ip}]}"
+                log "Using cached virtual MAC for ${ip}: ${virtual_mac}" >&2
+            else
+                virtual_mac=$(batctl translate "${ip}" 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
+                # Cache the result
+                if [ -n "${virtual_mac}" ]; then
+                    ip_to_mac_cache[${ip}]="${virtual_mac}"
+                fi
+            fi
+            
+            if [ -n "${virtual_mac}" ]; then
+                log "IP ${ip} has virtual MAC: ${virtual_mac}" >&2
+                
+                # Update translation table with this mapping
+                update_translation_entry "${ip}" "${virtual_mac}" "${hw_mac}"
+                
+                # Direct comparison with gateway MAC
                 if [ "${virtual_mac}" = "${gateway_mac}" ]; then
-                    log "Found matching gateway! IP: ${ip}, MAC: ${virtual_mac}" >&2
+                    log "Found direct match! IP: ${ip}, MAC: ${virtual_mac}" >&2
                     
                     # Verify gateway is still available
                     if is_gateway_available "${virtual_mac}"; then
@@ -341,14 +467,63 @@ detect_gateway_ip() {
                         log "Gateway ${ip} is not available in batman-adv" >&2
                     fi
                 fi
-            done
+            fi
+        done <<< "${mesh_nodes}"
+    done
+    
+    # If no direct match, look for any potential gateway
+    log "No direct match found, checking if any node can be a gateway" >&2
+    
+    while read -r ip hw_mac _; do
+        # Skip empty lines
+        [ -z "${ip}" ] && continue
+        
+        # Skip our own IP
+        [ "${ip}" = "${NODE_IP}" ] && continue
+        
+        log "Checking IP ${ip} (MAC: ${hw_mac})" >&2
+        
+        # Get virtual MAC for this IP using batctl translate
+        local virtual_mac
+        
+        # Check if we already have this IP's virtual MAC cached
+        if [ -n "${ip_to_mac_cache[${ip}]}" ]; then
+            virtual_mac="${ip_to_mac_cache[${ip}]}"
+            log "Using cached virtual MAC for ${ip}: ${virtual_mac}" >&2
+        else
+            virtual_mac=$(batctl translate "${ip}" 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
+            # Cache the result
+            if [ -n "${virtual_mac}" ]; then
+                ip_to_mac_cache[${ip}]="${virtual_mac}"
+            fi
+        fi
+        
+        if [ -n "${virtual_mac}" ]; then
+            log "IP ${ip} has virtual MAC: ${virtual_mac}" >&2
+            
+            # Update translation table with this mapping
+            update_translation_entry "${ip}" "${virtual_mac}" "${hw_mac}"
+            
+            # If we found a matching originator but no gateways, just use the first node
+            if is_gateway_available "${virtual_mac}"; then
+                log "Found usable mesh node! IP: ${ip}, MAC: ${virtual_mac}" >&2
+                log "Gateway ${ip} is available" >&2
+                printf "%s\n" "${ip}"
+                return 0
+            else
+                log "Mesh node ${ip} is not available as gateway" >&2
+            fi
         else
             log "Could not get virtual MAC for ${ip}" >&2
         fi
-    done
+    done <<< "${mesh_nodes}"
     
     return 1
 }
+
+#######################################
+# ROUTING AND NETWORK CONFIGURATION
+#######################################
 
 # Function to configure routing
 configure_routing() {
@@ -391,123 +566,10 @@ configure_routing() {
     return 0
 }
 
-# Start main script execution
-log "==== Starting mesh network configuration ===="
-
-# Validate configuration
-log "Validating configuration parameters"
-validate_config
-
-# Debug output
-log "Debug: MESH_INTERFACE=${MESH_INTERFACE}"
-
-# Verify required tools
-command -v batctl >/dev/null 2>&1 || { echo "Error: batctl not installed"; exit 1; }
-command -v ip >/dev/null 2>&1 || { echo "Error: ip command not found"; exit 1; }
-command -v iwconfig >/dev/null 2>&1 || { echo "Error: iwconfig not found"; exit 1; }
-command -v iptables >/dev/null 2>&1 || { echo "Error: iptables not found"; exit 1; }
-command -v nmcli >/dev/null 2>&1 || { echo "Error: nmcli not found"; exit 1; }
-
-# Verify interface exists and is wireless
-ip link show "${MESH_INTERFACE}" >/dev/null 2>&1 || { echo "Error: ${MESH_INTERFACE} interface not found"; exit 1; }
-iwconfig "${MESH_INTERFACE}" 2>/dev/null | grep -q "IEEE 802.11" || { echo "Error: ${MESH_INTERFACE} is not a wireless interface"; exit 1; }
-
-# Configure wireless interface
-log "Debug: Setting regulatory domain"
-iw reg set US
-sleep 1
-
-log "Debug: Disabling NetworkManager for ${MESH_INTERFACE}"
-nmcli device set "${MESH_INTERFACE}" managed no
-sleep 1
-
-log "Debug: Setting interface down"
-ip link set down dev "${MESH_INTERFACE}"
-sleep 1
-
-log "Debug: Loading batman-adv module"
-modprobe batman-adv
-if ! lsmod | grep -q "^batman_adv"; then
-    echo "Error: Failed to load batman-adv module"
-    exit 1
-fi
-sleep 2
-
-log "Debug: Setting routing algorithm to ${BATMAN_ROUTING_ALGORITHM}"
-if ! batctl ra "${BATMAN_ROUTING_ALGORITHM}"; then
-    echo "Error: Failed to set routing algorithm to ${BATMAN_ROUTING_ALGORITHM}"
-    exit 1
-fi
-sleep 1
-
-log "Debug: Setting MTU"
-ip link set mtu "${MESH_MTU}" dev "${MESH_INTERFACE}"
-sleep 1
-
-log "Debug: Configuring wireless settings"
-iwconfig "${MESH_INTERFACE}" mode ad-hoc
-iwconfig "${MESH_INTERFACE}" essid "${MESH_ESSID}"
-iwconfig "${MESH_INTERFACE}" ap "${MESH_CELL_ID}"
-iwconfig "${MESH_INTERFACE}" channel "${MESH_CHANNEL}"
-sleep 1
-
-log "Debug: Setting interface up"
-ip link set up dev "${MESH_INTERFACE}"
-sleep 3
-
-log "Debug: Verifying interface is up"
-if ! ip link show "${MESH_INTERFACE}" | grep -q "UP"; then
-    echo "Error: Failed to bring up ${MESH_INTERFACE}"
-    exit 1
-fi
-
-log "Debug: Adding interface to batman-adv"
-if ! batctl if add "${MESH_INTERFACE}"; then
-    echo "Error: Failed to add interface to batman-adv"
-    exit 1
-fi
-sleep 2
-
-log "Debug: Waiting for bat0 interface"
-for i in $(seq 1 30); do
-    if ip link show bat0 >/dev/null 2>&1; then
-        echo "bat0 interface is ready"
-        break
-    fi
-    if [ "$i" = "30" ]; then
-        echo "Error: Timeout waiting for bat0 interface"
-        exit 1
-    fi
-    echo "Waiting for bat0... attempt $i"
-    sleep 1
-done
-
-log "Debug: Setting bat0 up"
-ip link set up dev bat0
-sleep 1
-
-log "Debug: Configuring IP address"
-# Clean up existing IP configuration
-ip addr flush dev bat0 2>/dev/null || true
-ip addr add "${NODE_IP}/${MESH_NETMASK}" dev bat0 || {
-    echo "Error: Failed to add IP address to bat0"
-    exit 1
-}
-
-log "Debug: Adding mesh network route"
-# Calculate network address from NODE_IP and MESH_NETMASK
-NETWORK_ADDRESS="${NODE_IP%.*}.0"  # Extract first 3 octets and append .0
-ip route flush dev bat0 || echo "Warning: Could not flush routes"
-ip route add "${NETWORK_ADDRESS}/${MESH_NETMASK}" dev bat0 proto kernel scope link src "${NODE_IP}" || {
-    echo "Error: Failed to add mesh network route"
-    exit 1
-}
-
-# Add these variables near the top of the script, after the initial variable declarations
-VALID_WAN=""
-VALID_LAN=""
-
 # Function to get valid interfaces
+VALID_WAN=""
+VALID_AP=""
+VALID_ETH_LAN=""
 get_valid_interfaces() {
     log "Validating network interfaces..."
     
@@ -522,54 +584,243 @@ get_valid_interfaces() {
         log "WARNING: No valid WAN interface found"
     fi
     
-    # Check LAN interfaces with more detailed validation
-    if ip link show "${AP_IFACE}" >/dev/null 2>&1 && [ -n "${AP_IFACE}" ]; then
-        VALID_LAN="${AP_IFACE}"
-        log "Found LAN interface (AP): ${VALID_LAN}"
-    elif ip link show "${ETH_LAN}" >/dev/null 2>&1 && [ -n "${ETH_LAN}" ]; then
-        VALID_LAN="${ETH_LAN}"
-        log "Found LAN interface: ${VALID_LAN}"
+    # Check AP interface
+    if ip link show "${WAP_IFACE}" >/dev/null 2>&1 && [ -n "${WAP_IFACE}" ]; then
+        VALID_AP="${WAP_IFACE}"
+        log "Found AP interface: ${VALID_AP}"
     else
-        log "WARNING: No valid LAN interface found"
+        log "INFO: No AP interface found"
+    fi
+    
+    # Check Ethernet LAN interface
+    if ip link show "${ETH_LAN}" >/dev/null 2>&1 && [ -n "${ETH_LAN}" ]; then
+        VALID_ETH_LAN="${ETH_LAN}"  
+        log "Found Ethernet LAN interface: ${VALID_ETH_LAN}"
+    else
+        log "INFO: No Ethernet LAN interface found"
+    fi
+    
+    # Log if no LAN interfaces found
+    if [ -z "${VALID_AP}" ] && [ -z "${VALID_ETH_LAN}" ]; then
+        log "WARNING: No valid LAN interfaces found"
     fi
 }
 
-if [ "${ENABLE_ROUTING}" = "1" ]; then
-    log "Debug: Configuring routing and firewall"
+# Configure LAN interfaces
+setup_lan_interface() {
+    local interface="$1"
+    local ip_address="$2"
+    local interface_name="$3"  # Descriptive name for logs
     
-    # Validate interfaces first
-    get_valid_interfaces
+    log "Setting up ${interface_name} interface (${interface}) with IP ${ip_address}..."
     
-    # Log interface status
+    # Check if interface is defined and exists
+    if [ -z "${interface}" ]; then
+        log "${interface_name} interface is not defined in configuration, skipping setup"
+        return 0
+    fi
+    
+    # Check if the interface exists
+    if ! ip link show "${interface}" >/dev/null 2>&1; then
+        log "${interface_name} interface ${interface} does not exist, skipping setup"
+        return 0
+    fi
+    
+    # Check if IP is defined
+    if [ -z "${ip_address}" ]; then
+        log "IP address for ${interface_name} interface is not defined, skipping setup"
+        return 0
+    fi
+    
+    log "Configuring IP address for ${interface}"
+    # Flush existing IP configuration
+    ip addr flush dev "${interface}" 2>/dev/null || true
+    
+    # Set the IP address
+    if ! ip addr add "${ip_address}/${MESH_NETMASK}" dev "${interface}"; then
+        log "Error: Failed to set IP address ${ip_address}/${MESH_NETMASK} on ${interface}"
+        return 1
+    fi
+    
+    # Make sure the interface is up
+    log "Bringing ${interface} interface up"
+    if ! ip link set "${interface}" up; then
+        log "Error: Failed to bring ${interface} interface up"
+        return 1
+    fi
+    
+    log "${interface_name} interface ${interface} setup complete with IP ${ip_address}"
+    return 0
+}
+
+# Function to set up the AP interface
+setup_ap_interface() {
+    # Setup the AP interface
+    if ! setup_lan_interface "${WAP_IFACE}" "${WAP_IP}" "AP"; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to set up the Ethernet LAN interface
+setup_eth_lan_interface() {
+    local eth_lan_ip=""
+    
+    # Check if ETH_LAN_IP is defined, if not use the same subnet as WAP_IP but with .2
+    if [ -n "${ETH_LAN_IP}" ]; then
+        eth_lan_ip="${ETH_LAN_IP}"
+    elif [ -n "${WAP_IP}" ]; then
+        # Extract the first three octets from WAP_IP and append .2
+        eth_lan_ip="$(echo "${WAP_IP}" | cut -d. -f1-3).2"
+        log "ETH_LAN_IP not defined, using generated IP: ${eth_lan_ip}"
+    else
+        log "No IP address available for Ethernet LAN interface, skipping setup"
+        return 0
+    fi
+    
+    # Setup the Ethernet LAN interface
+    setup_lan_interface "${ETH_LAN}" "${eth_lan_ip}" "Ethernet LAN"
+}
+
+# Function to set up dnsmasq for DHCP and DNS
+setup_dnsmasq() {
+    log "Setting up dnsmasq configuration..."
+    
+    # Check if dnsmasq is installed
+    if ! command -v dnsmasq >/dev/null 2>&1; then
+        log "Error: dnsmasq is not installed"
+        return 1
+    fi
+    
+    # Set the default DNS servers if not defined
+    if [ -z "${DNS_SERVERS}" ]; then
+        DNS_SERVERS="9.9.9.9,8.8.8.8"
+        log "DNS_SERVERS not defined, using defaults: ${DNS_SERVERS}"
+    fi
+    
+    # Convert comma-separated DNS servers to space-separated format for dnsmasq
+    local dns_servers_formatted=$(echo "${DNS_SERVERS}" | tr ',' ' ')
+    
+    # Create dnsmasq configuration file
+    log "Creating new dnsmasq configuration..."
+    
+    # Backup original config if it exists
+    if [ -f "/etc/dnsmasq.conf" ]; then
+        local backup_file="/etc/dnsmasq.conf.bak.$(date +%Y%m%d%H%M%S)"
+        log "Backing up original dnsmasq.conf to ${backup_file}"
+        sudo cp "/etc/dnsmasq.conf" "${backup_file}" || {
+            log "Error: Failed to backup dnsmasq.conf"
+            return 1
+        }
+    fi
+    
+    # Create temporary config file
+    local tmp_conf=$(mktemp)
+    
+    # Write configuration to temporary file
+    cat > "${tmp_conf}" << EOF
+# Configuration file for dnsmasq - Generated by mesh-network.sh
+
+# Listen only on the LAN interfaces
+bind-interfaces
+EOF
+
+    # Add interfaces to listen on
+    if [ -n "${VALID_AP}" ] && [ -n "${WAP_IP}" ]; then
+        local wap_subnet=$(echo "${WAP_IP}" | cut -d. -f1-3)
+        echo "# AP Interface" >> "${tmp_conf}"
+        echo "interface=${VALID_AP}" >> "${tmp_conf}"
+        echo "dhcp-range=${wap_subnet}.50,${wap_subnet}.200,255.255.255.0,12h" >> "${tmp_conf}"
+        echo "" >> "${tmp_conf}"
+    fi
+    
+    if [ -n "${VALID_ETH_LAN}" ] && [ -n "${ETH_LAN_IP}" ]; then
+        local eth_subnet=$(echo "${ETH_LAN_IP}" | cut -d. -f1-3)
+        echo "# Ethernet LAN Interface" >> "${tmp_conf}"
+        echo "interface=${VALID_ETH_LAN}" >> "${tmp_conf}"
+        echo "dhcp-range=${eth_subnet}.50,${eth_subnet}.200,255.255.255.0,12h" >> "${tmp_conf}"
+        echo "" >> "${tmp_conf}"
+    fi
+    
+    # Add exceptions for WAN interfaces
     if [ -n "${VALID_WAN}" ]; then
-        log "Debug: Using WAN interface: ${VALID_WAN}"
-    else
-        log "Debug: No WAN interface available"
+        echo "# Exclude WAN interface" >> "${tmp_conf}"
+        echo "except-interface=${VALID_WAN}" >> "${tmp_conf}"
+        echo "" >> "${tmp_conf}"
     fi
     
-    if [ -n "${VALID_LAN}" ]; then
-        log "Debug: Using LAN interface: ${VALID_LAN}"
+    # Add DNS servers
+    echo "# DNS Configuration" >> "${tmp_conf}"
+    echo "no-resolv" >> "${tmp_conf}"
+    
+    # Add each DNS server individually
+    for dns in ${dns_servers_formatted}; do
+        echo "server=${dns}" >> "${tmp_conf}"
+    done
+    
+    echo "" >> "${tmp_conf}"
+    
+    # Add additional common configurations
+    cat >> "${tmp_conf}" << EOF
+# Common settings
+domain-needed
+bogus-priv
+expand-hosts
+domain=mesh.local
+local=/mesh.local/
+
+# DHCP options
+dhcp-option=option:router,${NODE_IP}
+dhcp-authoritative
+EOF
+    
+    # Install the new configuration
+    sudo cp "${tmp_conf}" "/etc/dnsmasq.conf" || {
+        log "Error: Failed to install new dnsmasq.conf"
+        rm -f "${tmp_conf}"
+        return 1
+    }
+    
+    # Clean up temporary file
+    rm -f "${tmp_conf}"
+    
+    # Restart dnsmasq service to apply new configuration
+    log "Restarting dnsmasq service to apply new configuration"
+    if systemctl is-active dnsmasq >/dev/null 2>&1; then
+        if ! systemctl restart dnsmasq; then
+            log "Error: Failed to restart dnsmasq service"
+            return 1
+        fi
     else
-        log "Debug: No LAN interface available"
+        log "dnsmasq service is not active, attempting to start it"
+        if ! systemctl start dnsmasq; then
+            log "Error: Failed to start dnsmasq service"
+            return 1
+        fi
     fi
     
-    # Enable IP forwarding
-    sysctl -w net.ipv4.ip_forward=1 || { echo "Error: Failed to enable IP forwarding"; exit 1; }
+    log "dnsmasq configuration completed successfully"
+    return 0
+}
+
+# Function to set up firewall rules
+setup_firewall() {
+    log "Setting up firewall rules..."
     
-    log "Debug: Flushing existing routes and firewall rules"
     # Clean up existing firewall rules, but don't touch routes
-    iptables -F || { echo "Error: Failed to flush iptables rules"; exit 1; }
-    iptables -t nat -F || { echo "Error: Failed to flush NAT rules"; exit 1; }
-    iptables -t mangle -F || { echo "Error: Failed to flush mangle rules"; exit 1; }
+    iptables -F || { log "Error: Failed to flush iptables rules"; return 1; }
+    iptables -t nat -F || { log "Error: Failed to flush NAT rules"; return 1; }
+    iptables -t mangle -F || { log "Error: Failed to flush mangle rules"; return 1; }
     
-    log "Debug: Setting default policies"
-    iptables -P INPUT ACCEPT || { echo "Error: Failed to set INPUT policy"; exit 1; }
-    iptables -P FORWARD ACCEPT || { echo "Error: Failed to set FORWARD policy"; exit 1; }
-    iptables -P OUTPUT ACCEPT || { echo "Error: Failed to set OUTPUT policy"; exit 1; }
+    log "Setting default policies"
+    iptables -P INPUT ACCEPT || { log "Error: Failed to set INPUT policy"; return 1; }
+    iptables -P FORWARD ACCEPT || { log "Error: Failed to set FORWARD policy"; return 1; }
+    iptables -P OUTPUT ACCEPT || { log "Error: Failed to set OUTPUT policy"; return 1; }
     
     # Configure NAT and routing for server mode
     if [ "${BATMAN_GW_MODE}" = "server" ] && [ -n "${VALID_WAN}" ]; then
-        log "Debug: Setting up NAT and routing for server mode"
+        log "Setting up NAT and routing for server mode"
         
         # Allow established connections
         iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -589,15 +840,21 @@ if [ "${ENABLE_ROUTING}" = "1" ]; then
         iptables -A FORWARD -i bat0 -o "${VALID_WAN}" -j ACCEPT
         iptables -A FORWARD -i "${VALID_WAN}" -o bat0 -m state --state RELATED,ESTABLISHED -j ACCEPT
         
-        # If we have a LAN interface, set up rules for it too
-        if [ -n "${VALID_LAN}" ]; then
-            # Allow forwarding between LAN and mesh/WAN
-            iptables -A FORWARD -i "${VALID_LAN}" -j ACCEPT
-            iptables -A FORWARD -o "${VALID_LAN}" -j ACCEPT
-        fi
+        # Set up rules for both LAN interfaces using a common pattern
+        for lan_iface in "${VALID_AP}" "${VALID_ETH_LAN}"; do
+            if [ -n "${lan_iface}" ]; then
+                log "Setting up forwarding for interface: ${lan_iface}"
+                # Allow forwarding between LAN interface and mesh/WAN
+                iptables -A FORWARD -i "${lan_iface}" -j ACCEPT
+                iptables -A FORWARD -o "${lan_iface}" -j ACCEPT
+                # Add specific rules for LAN to WAN
+                iptables -A FORWARD -i "${lan_iface}" -o "${VALID_WAN}" -j ACCEPT
+                iptables -A FORWARD -i "${VALID_WAN}" -o "${lan_iface}" -m state --state RELATED,ESTABLISHED -j ACCEPT
+            fi
+        done
     else
         # Client mode or no WAN interface
-        log "Debug: Setting up client mode routing and forwarding"
+        log "Setting up client mode routing and forwarding"
         iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
         iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
         
@@ -605,24 +862,167 @@ if [ "${ENABLE_ROUTING}" = "1" ]; then
         iptables -A FORWARD -i bat0 -j ACCEPT
         iptables -A FORWARD -o bat0 -j ACCEPT
         
-        # If we have a LAN interface (AP), set up forwarding to/from mesh
-        if [ -n "${VALID_LAN}" ]; then
-            log "Debug: Setting up LAN forwarding for client mode"
-            
-            # Allow forwarding between LAN and mesh
-            iptables -A FORWARD -i "${VALID_LAN}" -j ACCEPT
-            iptables -A FORWARD -o "${VALID_LAN}" -j ACCEPT
-            
-            # NAT all traffic from LAN to mesh
-            iptables -t nat -A POSTROUTING -o bat0 -j MASQUERADE
-        fi
+        # Set up rules for both LAN interfaces using a common pattern
+        for lan_iface in "${VALID_AP}" "${VALID_ETH_LAN}"; do
+            if [ -n "${lan_iface}" ]; then
+                log "Setting up forwarding for interface: ${lan_iface}"
+                # Allow forwarding between LAN and mesh
+                iptables -A FORWARD -i "${lan_iface}" -j ACCEPT
+                iptables -A FORWARD -o "${lan_iface}" -j ACCEPT
+                
+                # Determine the subnet based on the interface
+                local subnet=""
+                if [ "${lan_iface}" = "${VALID_AP}" ] && [ -n "${WAP_IP}" ]; then
+                    subnet="-s $(echo "${WAP_IP}" | cut -d. -f1-3).0/24"
+                elif [ "${lan_iface}" = "${VALID_ETH_LAN}" ] && [ -n "${ETH_LAN_IP}" ]; then
+                    subnet="-s $(echo "${ETH_LAN_IP}" | cut -d. -f1-3).0/24"
+                fi
+                
+                # NAT all traffic from LAN to mesh
+                if [ -n "${subnet}" ]; then
+                    log "Setting up NAT for subnet ${subnet} from ${lan_iface} to bat0"
+                    iptables -t nat -A POSTROUTING -o bat0 ${subnet} -j MASQUERADE
+                else
+                    # Fallback if no subnet info available
+                    log "Setting up NAT for all traffic from ${lan_iface} to bat0"
+                    iptables -t nat -A POSTROUTING -o bat0 -j MASQUERADE
+                fi
+            fi
+        done
     fi
     
-    log "Debug: Setting up logging rules"
+    log "Setting up logging rules"
     # Security logging
     iptables -A INPUT -m limit --limit 5/min -j LOG --log-prefix "iptables_INPUT_denied: " --log-level 7
     iptables -A FORWARD -m limit --limit 5/min -j LOG --log-prefix "iptables_FORWARD_denied: " --log-level 7
     
+    return 0
+}
+
+# Function to configure batman-adv parameters
+setup_batman_params() {
+    log "Setting BATMAN-adv parameters"
+    
+    if ! batctl gw_mode "${BATMAN_GW_MODE}"; then
+        log "Error: Failed to set gateway mode"
+        return 1
+    fi
+
+    if ! batctl orig_interval "${BATMAN_ORIG_INTERVAL}"; then
+        log "Error: Failed to set originator interval"
+        return 1
+    fi
+
+    if ! batctl hop_penalty "${BATMAN_HOP_PENALTY}"; then
+        log "Error: Failed to set hop penalty"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Setup wireless interface for mesh
+setup_wireless_interface() {
+    log "Setting up wireless interface ${MESH_IFACE}"
+    
+    log "Disabling NetworkManager for ${MESH_IFACE}"
+    nmcli device set "${MESH_IFACE}" managed no
+    sleep 0.5
+
+    log "Setting interface down"
+    ip link set down dev "${MESH_IFACE}"
+    sleep 0.5
+
+    log "Loading batman-adv module"
+    modprobe batman-adv
+    if ! lsmod | grep -q "^batman_adv"; then
+        log "Error: Failed to load batman-adv module"
+        return 1
+    fi
+    sleep 1
+
+    log "Setting routing algorithm to ${BATMAN_ROUTING_ALGORITHM}"
+    if ! batctl ra "${BATMAN_ROUTING_ALGORITHM}"; then
+        log "Error: Failed to set routing algorithm to ${BATMAN_ROUTING_ALGORITHM}"
+        return 1
+    fi
+    sleep 0.5
+
+    log "Setting MTU"
+    ip link set mtu "${MESH_MTU}" dev "${MESH_IFACE}"
+    sleep 0.5
+
+    log "Configuring wireless settings"
+    iwconfig "${MESH_IFACE}" mode ad-hoc
+    iwconfig "${MESH_IFACE}" essid "${MESH_ESSID}"
+    iwconfig "${MESH_IFACE}" ap "${MESH_CELL_ID}"
+    iwconfig "${MESH_IFACE}" channel "${MESH_CHANNEL}"
+    sleep 0.5
+
+    log "Setting interface up"
+    ip link set up dev "${MESH_IFACE}"
+    sleep 1
+
+    log "Verifying interface is up"
+    if ! ip link show "${MESH_IFACE}" | grep -q "UP"; then
+        log "Error: Failed to bring up ${MESH_IFACE}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Setup batman-adv interface
+setup_batman_interface() {
+    log "Setting up batman-adv interface"
+    
+    log "Adding interface to batman-adv"
+    if ! batctl if add "${MESH_IFACE}"; then
+        log "Error: Failed to add interface to batman-adv"
+        return 1
+    fi
+    sleep 1
+
+    log "Waiting for bat0 interface"
+    for i in $(seq 1 30); do
+        if ip link show bat0 >/dev/null 2>&1; then
+            log "bat0 interface is ready"
+            break
+        fi
+        if [ "$i" = "30" ]; then
+            log "Error: Timeout waiting for bat0 interface"
+            return 1
+        fi
+        log "Waiting for bat0... attempt $i"
+        sleep 0.5
+    done
+
+    log "Setting bat0 up"
+    ip link set up dev bat0
+    sleep 0.5
+
+    log "Configuring IP address"
+    # Clean up existing IP configuration
+    ip addr flush dev bat0 2>/dev/null || true
+    ip addr add "${NODE_IP}/${MESH_NETMASK}" dev bat0 || {
+        log "Error: Failed to add IP address to bat0"
+        return 1
+    }
+
+    log "Adding mesh network route"
+    # Calculate network address from NODE_IP and MESH_NETMASK
+    NETWORK_ADDRESS="${NODE_IP%.*}.0"  # Extract first 3 octets and append .0
+    ip route flush dev bat0 || log "Warning: Could not flush routes"
+    ip route add "${NETWORK_ADDRESS}/${MESH_NETMASK}" dev bat0 proto kernel scope link src "${NODE_IP}" || {
+        log "Error: Failed to add mesh network route"
+        return 1
+    }
+    
+    return 0
+}
+
+# Function to setup routing based on mode
+setup_initial_routing() {
     # Configure routing based on mode
     if [ "${BATMAN_GW_MODE}" = "server" ]; then
         log "Running in server mode, configuring gateway rules"
@@ -632,114 +1032,115 @@ if [ "${ENABLE_ROUTING}" = "1" ]; then
             log "Warning: Server mode but no WAN interface available"
         fi
     else
-        log "Client mode: Pending gateway detection"
-        # log "Client mode: Starting gateway detection"
-        # detected_gateway=$(detect_gateway_ip) || {
-        #     log "DEBUG: Initial gateway detection failed, will retry later"
-        #     detected_gateway=""
-        # }
+        # Client mode: Attempt detection immediately with multiple retries
+        log "Client mode: Attempting initial gateway detection with retries..."
+        local initial_gateway=""
+        local retry_count=0
+        local max_retries=10
+        local retry_delay=3
+        local cached_mesh_nodes=""
+        local last_scan_time=0
+        local scan_validity_period=15  # Consider scan results valid for 15 seconds
         
-        # if [ -n "${detected_gateway}" ]; then
-        #     GATEWAY_IP="${detected_gateway}"
-        #     log "DEBUG: Using detected gateway: ${GATEWAY_IP}"
-        #     configure_routing "${GATEWAY_IP}" || log "Warning: Failed to configure initial routing"
-        # else
-        #     log "DEBUG: No valid gateway found initially, continuing without gateway"
-        # fi
-    fi
-    
-    # Verify the configuration
-    # log "Debug: Verifying NAT and routing configuration"
-    # iptables -t nat -L -v
-    # ip route show
-fi
-
-log "Debug: Setting BATMAN-adv parameters"
-if ! batctl gw_mode "${BATMAN_GW_MODE}"; then
-    echo "Error: Failed to set gateway mode"
-    exit 1
-fi
-
-if ! batctl orig_interval "${BATMAN_ORIG_INTERVAL}"; then
-    echo "Error: Failed to set originator interval"
-    exit 1
-fi
-
-if ! batctl hop_penalty "${BATMAN_HOP_PENALTY}"; then
-    echo "Error: Failed to set hop penalty"
-    exit 1
-fi
-
-# if ! batctl bat0 loglevel "${BATMAN_LOG_LEVEL}"; then
-#     echo "Error: Failed to set log level"
-#     exit 1
-# fi
-
-log "==== Mesh network configuration complete ===="
-
-# Improved interface setup with better error handling
-setup_interface() {
-    local max_retries=3
-    local retry_count=0
-    
-    while [ $retry_count -lt $max_retries ]; do
-        log "Attempting interface setup (attempt $((retry_count + 1))/${max_retries})"
+        # Wait for mesh to stabilize
+        log "Waiting for mesh network to stabilize..."
+        sleep 3
         
-        # Clean up any existing configuration
-        ip link set down dev "${MESH_INTERFACE}" 2>/dev/null || true
-        ip addr flush dev "${MESH_INTERFACE}" 2>/dev/null || true
+        # Proactively send some packets to help establish mesh connections
+        log "Proactively triggering batman-adv discovery..."
+        batctl o -n >/dev/null 2>&1 || true  # Force batman-adv to update originator table
+        ping -c 3 -b 10.0.0.255 >/dev/null 2>&1 || true  # Broadcast ping to help discovery
         
-        if ! timeout_exec 10 ip link set "${MESH_INTERFACE}" up; then
-            log "Failed to bring up interface, retrying..."
-            sleep 2
-            retry_count=$((retry_count + 1))
-            continue
+        # Loop until we see originators or max 10 seconds
+        local start_time=$(date +%s)
+        local wait_time=10
+        local found_originator=0
+        
+        while [ $(($(date +%s) - start_time)) -lt $wait_time ]; do
+            if batctl o -n 2>/dev/null | grep -q " \* " && [ $found_originator -eq 0 ]; then
+                log "Found originator in the mesh network"
+                found_originator=1
+                break
+            fi
+            log "Waiting for mesh originators to appear..."
+            batctl o -n >/dev/null 2>&1 || true
+            ping -c 1 -b 10.0.0.255 >/dev/null 2>&1 || true
+            sleep 0.5
+        done
+        
+        while [ $retry_count -lt $max_retries ] && [ -z "$initial_gateway" ]; do
+            log "Gateway detection attempt $((retry_count+1))/$max_retries"
+            
+            # Use cached_mesh_nodes or set to empty to force a new scan
+            if [ -z "$cached_mesh_nodes" ] || [ $(($(date +%s) - last_scan_time)) -gt $scan_validity_period ]; then
+                initial_gateway=$(detect_gateway_ip)
+            else
+                log "Using cached scan results from previous attempt"
+                # Call a modified version of detect_gateway_ip that uses cached results
+                initial_gateway=$(MESH_SCAN_CACHE="$cached_mesh_nodes" detect_gateway_ip)
+            fi
+            
+            if [ -n "$initial_gateway" ]; then
+                log "Initial gateway detection successful: ${initial_gateway}"
+                if configure_routing "${initial_gateway}"; then
+                    log "Successfully configured initial route via ${initial_gateway} dev bat0."
+                    break
+                else
+                    log "Warning: Failed to configure initial routing for gateway ${initial_gateway}."
+                    initial_gateway=""  # Reset to trigger another retry
+                fi
+            else
+                # Extract and cache mesh nodes found during scan if any
+                if grep -q "Found mesh nodes:" "${LOG_FILE}"; then
+                    cached_mesh_nodes=$(grep -A 1 "Found mesh nodes:" "${LOG_FILE}" | tail -n 1 | sed 's/.*Found mesh nodes: //')
+                    last_scan_time=$(date +%s)
+                    log "Cached mesh nodes for future attempts: ${cached_mesh_nodes}"
+                fi
+                
+                log "No gateway found on attempt $((retry_count+1)), waiting ${retry_delay}s before retry..."
+                # Force batman-adv to send originators to speed up discovery
+                if [ $((retry_count % 2)) -eq 0 ]; then
+                    log "Refreshing batman-adv discovery data..."
+                    batctl o -n >/dev/null 2>&1 || true
+                    ping -c 1 -b 10.0.0.255 >/dev/null 2>&1 || true
+                fi
+                sleep $retry_delay
+            fi
+            
+            retry_count=$((retry_count+1))
+        done
+        
+        if [ -z "$initial_gateway" ]; then
+            log "Initial gateway detection failed after $max_retries attempts. Will rely on monitoring loop."
         fi
-        
-        if ! timeout_exec 5 iwconfig "${MESH_INTERFACE}" mode ad-hoc; then
-            log "Failed to set ad-hoc mode, retrying..."
-            sleep 2
-            retry_count=$((retry_count + 1))
-            continue
-        fi
-        
-        # Configure wireless settings
-        iwconfig "${MESH_INTERFACE}" essid "${MESH_ESSID}"
-        sleep 1
-        iwconfig "${MESH_INTERFACE}" ap "${MESH_CELL_ID}"
-        sleep 1
-        iwconfig "${MESH_INTERFACE}" channel "${MESH_CHANNEL}"
-        sleep 2
-        
-        # Verify configuration
-        if iwconfig "${MESH_INTERFACE}" | grep -q "${MESH_ESSID}"; then
-            log "Interface setup successful"
-            return 0
-        fi
-        
-        retry_count=$((retry_count + 1))
-        sleep 2
-    done
-    
-    log "Failed to setup interface after ${max_retries} attempts"
-    return 1
-}
-
-# Improved main execution with proper cleanup
-cleanup() {
-    log "Cleaning up..."
-    if [ -f /var/run/mesh-network-monitor.pid ]; then
-        kill $(cat /var/run/mesh-network-monitor.pid) 2>/dev/null || true
-        rm -f /var/run/mesh-network-monitor.pid
     fi
 }
 
-trap cleanup EXIT
+# Check requirements for mesh network
+check_requirements() {
+    log "Checking required tools..."
+    
+    # Verify required tools
+    command -v batctl >/dev/null 2>&1 || { log "Error: batctl not installed"; return 1; }
+    command -v ip >/dev/null 2>&1 || { log "Error: ip command not found"; return 1; }
+    command -v iwconfig >/dev/null 2>&1 || { log "Error: iwconfig not found"; return 1; }
+    command -v iptables >/dev/null 2>&1 || { log "Error: iptables not found"; return 1; }
+    command -v nmcli >/dev/null 2>&1 || { log "Error: nmcli not found"; return 1; }
 
-# If running as a service, keep the script running to maintain the network
-if [ "${1}" = "service" ]; then
-    # Simplified service monitoring
-    RETRY_INTERVAL=30  # Time between retries in seconds
+    # Verify interface exists and is wireless
+    ip link show "${MESH_IFACE}" >/dev/null 2>&1 || { log "Error: ${MESH_IFACE} interface not found"; return 1; }
+    iwconfig "${MESH_IFACE}" 2>/dev/null | grep -q "IEEE 802.11" || { log "Error: ${MESH_IFACE} is not a wireless interface"; return 1; }
+    
+    return 0
+}
+
+#######################################
+# MONITORING AND SERVICE FUNCTIONS
+#######################################
+
+# Monitor mesh network service mode
+monitor_mesh_network() {
+    local RETRY_INTERVAL=30  # Time between retries in seconds
     
     while true; do
         # Check if bat0 interface is up
@@ -758,27 +1159,29 @@ if [ "${1}" = "service" ]; then
             fi
         else
             # For client mode, check gateway and routing
-            if ! ip route show | grep -q "^default"; then
-                log "No default route found, checking for gateway..."
+            # Only check for default routes via bat0 interface
+            if ! ip route show | grep -q "^default.*dev bat0"; then
+                log "No default route found via bat0, checking for gateway..."
                 gateway_ip=$(detect_gateway_ip)
                 
                 if [ -n "${gateway_ip}" ]; then
                     if configure_routing "${gateway_ip}"; then
-                        sleep 2
-                        if ! ip route show | grep -q "^default"; then
+                        sleep 1
+                        if ! ip route show | grep -q "^default.*dev bat0"; then
                             log "Route verification failed, will retry"
                             continue
                         fi
                     fi
                 fi
             else
-                # Check if current gateway is still valid
-                current_gateway=$(ip route show | grep "^default" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+                # Check if current gateway via bat0 is still valid
+                current_gateway=$(ip route show | grep "^default.*dev bat0" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
                 if [ -n "${current_gateway}" ]; then
                     unreachable=$(monitor_gateway "${current_gateway}")
                     if [ "${unreachable}" = "true" ]; then
-                        log "Current gateway ${current_gateway} is unreachable after multiple attempts"
-                        ip route del default 2>/dev/null || true
+                        log "Current mesh gateway ${current_gateway} is unreachable after multiple attempts"
+                        # Only delete the default route via bat0, not other default routes
+                        ip route del default dev bat0 2>/dev/null || true
                     fi
                 fi
             fi
@@ -786,5 +1189,102 @@ if [ "${1}" = "service" ]; then
         
         sleep "${RETRY_INTERVAL}"
     done
-fi
+}
 
+# Function for cleanup on exit
+cleanup() {
+    log "Cleaning up..."
+    if [ -f /var/run/mesh-network-monitor.pid ]; then
+        kill $(cat /var/run/mesh-network-monitor.pid) 2>/dev/null || true
+        rm -f /var/run/mesh-network-monitor.pid
+    fi
+}
+
+#######################################
+# MAIN SCRIPT EXECUTION
+#######################################
+
+# Main setup function
+setup_mesh_network() {
+    # Validate configuration
+    log "Validating configuration parameters"
+    validate_config
+    
+    # Check requirements
+    check_requirements || exit 1
+    
+    # Setup wireless interface
+    setup_wireless_interface || exit 1
+    
+    # Setup batman-adv interface
+    setup_batman_interface || exit 1
+    
+    # Get valid network interfaces
+    get_valid_interfaces
+    
+    # Configure routing and firewall
+    log "Configuring routing and firewall"
+    
+    # Log interface status
+    if [ -n "${VALID_WAN}" ]; then
+        log "Using WAN interface: ${VALID_WAN}"
+    else
+        log "No WAN interface available"
+    fi
+    
+    if [ -n "${VALID_AP}" ]; then
+        log "Using AP interface: ${VALID_AP}"
+    else
+        log "No AP interface available"
+    fi
+    
+    if [ -n "${VALID_ETH_LAN}" ]; then
+        log "Using Ethernet LAN interface: ${VALID_ETH_LAN}"
+    else
+        log "No Ethernet LAN interface available"
+    fi
+    
+    # Enable IP forwarding
+    sysctl -w net.ipv4.ip_forward=1 || { log "Error: Failed to enable IP forwarding"; exit 1; }
+    
+    # Setup firewall rules
+    setup_firewall || exit 1
+    
+    # Setup initial routing
+    setup_initial_routing
+    
+    # Set batman-adv parameters
+    setup_batman_params || exit 1
+}
+
+# Set up cleanup trap
+trap cleanup EXIT
+
+# Initialize logging
+setup_logging "$1"
+
+# Run main script
+log "==== Core Mesh Network Setup ===="
+setup_mesh_network
+
+# Setup additional interfaces
+log "==== Setting up additional network interfaces ===="
+# Setup AP interface
+log "Setting up Access Point interface"
+setup_ap_interface || log "Warning: AP interface setup failed"
+
+# Setup Ethernet LAN interface
+log "Setting up Ethernet LAN interface"
+setup_eth_lan_interface || log "Warning: Ethernet LAN interface setup failed"
+
+# Setup dnsmasq for DHCP and DNS
+log "Setting up dnsmasq configuration"
+setup_dnsmasq || log "Warning: dnsmasq setup failed"
+
+log "==== Mesh network setup complete ===="
+
+# If running as a service, start monitoring
+if [ "${1}" = "service" ]; then
+    log "==== Starting monitoring service ===="
+    monitor_mesh_network
+fi
