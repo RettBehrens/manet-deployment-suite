@@ -112,7 +112,7 @@ sudo nano /etc/mesh-network/mesh-config.conf
 # Restart service
 sudo systemctl restart mesh-network.service
 
-# Optional: view logs to see what's happening.
+# Optional: view logs to see what's happening
 tail -f /var/log/mesh-network/mesh-network.log
 ```
 
