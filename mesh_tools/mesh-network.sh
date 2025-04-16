@@ -45,6 +45,17 @@ setup_logging() {
         mv "${LOG_FILE}" "${LOG_OLD_DIR}/mesh-network.log.${TIMESTAMP}"
         # Log rotation message to the new file once it's created
         ROTATION_MESSAGE="Log file rotated at $(date '+%Y-%m-%d %H:%M:%S'). Previous log saved as ${LOG_OLD_DIR}/mesh-network.log.${TIMESTAMP}"
+        
+        # Cleanup old log files - keep only 20 most recent logs
+        if [ -d "${LOG_OLD_DIR}" ]; then
+            # Count files and delete oldest if more than 20
+            LOG_COUNT=$(find "${LOG_OLD_DIR}" -name "mesh-network.log.*" | wc -l)
+            if [ "${LOG_COUNT}" -gt 20 ]; then
+                # Find and delete oldest logs, preserving the 20 most recent
+                find "${LOG_OLD_DIR}" -name "mesh-network.log.*" | sort | head -n $((LOG_COUNT - 20)) | xargs rm -f 2>/dev/null
+                CLEANUP_MESSAGE="Cleaned up old logs. Keeping 20 most recent backups."
+            fi
+        fi
     fi
     
     # Create new log file and set permissions
@@ -68,6 +79,9 @@ setup_logging() {
     # Output rotation message if we rotated the log
     if [ -n "${ROTATION_MESSAGE}" ]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${ROTATION_MESSAGE}"
+        if [ -n "${CLEANUP_MESSAGE}" ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${CLEANUP_MESSAGE}"
+        fi
     fi
 }
 
@@ -297,24 +311,7 @@ detect_gateway_ip() {
     local gateway_macs
     gateway_macs=$(get_gateway_macs)
     
-    if [ -z "${gateway_macs}" ]; then
-        log "No batman-adv gateways found via batctl gwl" >&2
-        
-        # Try using originators if no gateways are announced
-        log "Checking for mesh originators/neighbors instead..." >&2
-        local originator_macs
-        originator_macs=$(batctl o -n 2>/dev/null | grep -v "B.A.T.M.A.N." | grep -E '^ \*' | awk '{print $2}' | grep -E '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' | sort -u)
-        
-        if [ -n "${originator_macs}" ]; then
-            log "Found mesh originator MAC(s): ${originator_macs}" >&2
-            # Use these as potential gateways - consider first originator as gateway
-            gateway_macs="${originator_macs}"
-            log "Using mesh originators as potential gateways" >&2
-        else
-            log "No mesh originators found either" >&2
-            return 1
-        fi
-    fi
+    [ -z "${gateway_macs}" ] && { log "No batman-adv gateways found via batctl gwl" >&2; return 1; }
     
     log "Found batman-adv gateway MAC(s): ${gateway_macs}" >&2
 
@@ -606,14 +603,12 @@ get_valid_interfaces() {
     fi
 }
 
-# Configure LAN interfaces
+# Configure LAN interfaces (shared function for AP and Ethernet LAN)
 setup_lan_interface() {
     local interface="$1"
     local ip_address="$2"
     local interface_name="$3"  # Descriptive name for logs
-    
-    log "Setting up ${interface_name} interface (${interface}) with IP ${ip_address}..."
-    
+
     # Check if interface is defined and exists
     if [ -z "${interface}" ]; then
         log "${interface_name} interface is not defined in configuration, skipping setup"
@@ -624,6 +619,14 @@ setup_lan_interface() {
     if ! ip link show "${interface}" >/dev/null 2>&1; then
         log "${interface_name} interface ${interface} does not exist, skipping setup"
         return 0
+    fi
+
+    log "Setting up ${interface_name} interface (${interface}) with IP ${ip_address}..."
+
+    # Disable NetworkManager for the AP interface
+    if command -v nmcli >/dev/null 2>&1; then
+        log "Disabling NetworkManager for ${interface}"
+        nmcli device set "${interface}" managed no || log "Warning: Failed to disable NetworkManager for ${interface}"
     fi
     
     # Check if IP is defined
@@ -660,6 +663,13 @@ setup_ap_interface() {
         return 1
     fi
     
+    # If AP interface setup was successful, set up hostapd
+    if setup_hostapd; then
+        log "AP interface and hostapd setup complete"
+    else
+        log "Warning: hostapd setup failed"
+    fi
+    
     return 0
 }
 
@@ -685,8 +695,6 @@ setup_eth_lan_interface() {
 
 # Function to set up dnsmasq for DHCP and DNS
 setup_dnsmasq() {
-    log "Setting up dnsmasq configuration..."
-    
     # Check if dnsmasq is installed
     if ! command -v dnsmasq >/dev/null 2>&1; then
         log "Error: dnsmasq is not installed"
@@ -705,14 +713,19 @@ setup_dnsmasq() {
     # Create dnsmasq configuration file
     log "Creating new dnsmasq configuration..."
     
-    # Backup original config if it exists
+    # Backup original config if it exists and no backup exists yet
     if [ -f "/etc/dnsmasq.conf" ]; then
-        local backup_file="/etc/dnsmasq.conf.bak.$(date +%Y%m%d%H%M%S)"
-        log "Backing up original dnsmasq.conf to ${backup_file}"
-        sudo cp "/etc/dnsmasq.conf" "${backup_file}" || {
-            log "Error: Failed to backup dnsmasq.conf"
-            return 1
-        }
+        # Check if any backup already exists
+        if ! ls /etc/dnsmasq.conf.bak.* >/dev/null 2>&1; then
+            local backup_file="/etc/dnsmasq.conf.bak.$(date +%Y%m%d%H%M%S)"
+            log "Backing up original dnsmasq.conf to ${backup_file}"
+            sudo cp "/etc/dnsmasq.conf" "${backup_file}" || {
+                log "Error: Failed to backup dnsmasq.conf"
+                return 1
+            }
+        else
+            log "Backup of dnsmasq.conf already exists, skipping backup"
+        fi
     fi
     
     # Create temporary config file
@@ -787,20 +800,126 @@ EOF
     
     # Restart dnsmasq service to apply new configuration
     log "Restarting dnsmasq service to apply new configuration"
-    if systemctl is-active dnsmasq >/dev/null 2>&1; then
-        if ! systemctl restart dnsmasq; then
-            log "Error: Failed to restart dnsmasq service"
-            return 1
-        fi
-    else
-        log "dnsmasq service is not active, attempting to start it"
-        if ! systemctl start dnsmasq; then
-            log "Error: Failed to start dnsmasq service"
-            return 1
+    if ! systemctl restart dnsmasq; then
+        log "Error: Failed to restart dnsmasq service"
+        return 1
+    fi
+
+    log "dnsmasq configuration completed successfully"
+    return 0
+}
+
+setup_hostapd() {
+    log "Setting up hostapd configuration..."
+    
+    # Check if hostapd is installed
+    if ! command -v hostapd >/dev/null 2>&1; then
+        log "Error: hostapd is not installed"
+        return 1
+    fi
+    
+    # Check if AP interface exists and is valid
+    if [ -z "${VALID_AP}" ]; then
+        log "No valid AP interface found, skipping hostapd setup"
+        return 1
+    fi
+    
+    # Check for necessary configuration variables
+    if [ -z "${WAP_SSID}" ]; then
+        log "WAP_SSID not defined, using default: MeshAP"
+        WAP_SSID="MeshAP"
+    fi
+    
+    if [ -z "${WAP_PASSWORD}" ]; then
+        log "WAP_PASSWORD not defined, using default random password"
+        WAP_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 12)
+        log "Generated random WAP password: ${WAP_PASSWORD}"
+    elif [ ${#WAP_PASSWORD} -lt 8 ]; then
+        log "Warning: WAP_PASSWORD is too short. Using random password instead."
+        WAP_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 12)
+        log "Generated random WAP password: ${WAP_PASSWORD}"
+    fi
+    
+    if [ -z "${WAP_CHANNEL}" ]; then
+        log "WAP_CHANNEL not defined, using default: 6"
+        WAP_CHANNEL=6
+    fi
+    
+    # Create hostapd configuration file
+    log "Creating hostapd configuration..."
+    
+    # Backup original config if it exists and no backup exists yet
+    if [ -f "/etc/hostapd/hostapd.conf" ]; then
+        # Check if any backup already exists
+        if ! ls /etc/hostapd/hostapd.conf.bak.* >/dev/null 2>&1; then
+            local backup_file="/etc/hostapd/hostapd.conf.bak.$(date +%Y%m%d%H%M%S)"
+            log "Backing up original hostapd.conf to ${backup_file}"
+            sudo cp "/etc/hostapd/hostapd.conf" "${backup_file}" || {
+                log "Error: Failed to backup hostapd.conf"
+                return 1
+            }
+        else
+            log "Backup of hostapd.conf already exists, skipping backup"
         fi
     fi
     
-    log "dnsmasq configuration completed successfully"
+    # Create temporary config file
+    local tmp_conf=$(mktemp)
+    
+    # Write configuration to temporary file
+    cat > "${tmp_conf}" << EOF
+# hostapd configuration file - Generated by mesh-network.sh
+
+# Interface configuration
+interface=${VALID_AP}
+driver=nl80211
+
+# SSID configuration
+ssid=${WAP_SSID}
+
+# Hardware mode
+hw_mode=${WAP_HW_MODE}
+channel=${WAP_CHANNEL}
+
+# Authentication
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+wpa_passphrase=${WAP_PASSWORD}
+
+# Other configurations
+macaddr_acl=0
+ignore_broadcast_ssid=0
+EOF
+    
+    # Create hostapd directory if it doesn't exist
+    sudo mkdir -p "/etc/hostapd" 2>/dev/null || {
+        log "Error: Failed to create hostapd directory"
+        rm -f "${tmp_conf}"
+        return 1
+    }
+    
+    # Install the new configuration
+    sudo cp "${tmp_conf}" "/etc/hostapd/hostapd.conf" || {
+        log "Error: Failed to install new hostapd.conf"
+        rm -f "${tmp_conf}"
+        return 1
+    }
+    
+    # Clean up temporary file
+    rm -f "${tmp_conf}"
+
+    
+    # Restart hostapd service
+    log "Restarting hostapd service"
+    if ! systemctl restart hostapd; then
+        log "Error: Failed to restart hostapd service"
+        return 1
+    fi
+    
+    log "hostapd configuration completed successfully"
     return 0
 }
 
@@ -1021,7 +1140,7 @@ setup_batman_interface() {
     return 0
 }
 
-# Function to setup routing based on mode
+# Aggressively scan for gateways and configure routing; runs initially to get networking up quickly. Will fall back to monitoring loop if no gateways are found.
 setup_initial_routing() {
     # Configure routing based on mode
     if [ "${BATMAN_GW_MODE}" = "server" ]; then
@@ -1036,15 +1155,15 @@ setup_initial_routing() {
         log "Client mode: Attempting initial gateway detection with retries..."
         local initial_gateway=""
         local retry_count=0
-        local max_retries=10
+        local max_retries=5
         local retry_delay=3
         local cached_mesh_nodes=""
         local last_scan_time=0
-        local scan_validity_period=15  # Consider scan results valid for 15 seconds
+        local scan_validity_period=30
         
         # Wait for mesh to stabilize
         log "Waiting for mesh network to stabilize..."
-        sleep 3
+        sleep 5
         
         # Proactively send some packets to help establish mesh connections
         log "Proactively triggering batman-adv discovery..."
@@ -1140,7 +1259,7 @@ check_requirements() {
 
 # Monitor mesh network service mode
 monitor_mesh_network() {
-    local RETRY_INTERVAL=30  # Time between retries in seconds
+    local RETRY_INTERVAL=10  # Time between retries in seconds
     
     while true; do
         # Check if bat0 interface is up
@@ -1201,6 +1320,24 @@ cleanup() {
 }
 
 #######################################
+# Setup Interfaces and Services
+#######################################
+
+setup_interfaces_and_services() {
+    # Setup Ethernet LAN interface
+    log "Setting up Ethernet LAN interface..."
+    setup_eth_lan_interface || log "Warning: Ethernet LAN interface setup failed"
+
+    # Setup AP interface
+    log "Setting up Access Point interface"
+    setup_ap_interface || log "Warning: AP interface setup failed"
+
+    # Setup dnsmasq for DHCP and DNS (important that this is done last or it will fail to start)
+    log "Setting up dnsmasq configuration..."
+    setup_dnsmasq || log "Warning: dnsmasq setup failed"
+}
+
+#######################################
 # MAIN SCRIPT EXECUTION
 #######################################
 
@@ -1218,6 +1355,9 @@ setup_mesh_network() {
     
     # Setup batman-adv interface
     setup_batman_interface || exit 1
+
+    # Set batman-adv parameters
+    setup_batman_params || exit 1
     
     # Get valid network interfaces
     get_valid_interfaces
@@ -1230,7 +1370,7 @@ setup_mesh_network() {
         log "Using WAN interface: ${VALID_WAN}"
     else
         log "No WAN interface available"
-    fi
+    fi  
     
     if [ -n "${VALID_AP}" ]; then
         log "Using AP interface: ${VALID_AP}"
@@ -1250,12 +1390,15 @@ setup_mesh_network() {
     # Setup firewall rules
     setup_firewall || exit 1
     
+    # Setup additional interfaces, configure dnsmasq(dhcp server) and hostapd
+    log "==== SETTING UP ADDITIONAL NETWORK INTERFACES ===="
+    setup_interfaces_and_services
+
     # Setup initial routing
-    setup_initial_routing
+    setup_initial_routing || exit 1
     
-    # Set batman-adv parameters
-    setup_batman_params || exit 1
 }
+
 
 # Set up cleanup trap
 trap cleanup EXIT
@@ -1264,27 +1407,13 @@ trap cleanup EXIT
 setup_logging "$1"
 
 # Run main script
-log "==== Core Mesh Network Setup ===="
+log "==== MESH NETWORK SETUP ===="
 setup_mesh_network
 
-# Setup additional interfaces
-log "==== Setting up additional network interfaces ===="
-# Setup AP interface
-log "Setting up Access Point interface"
-setup_ap_interface || log "Warning: AP interface setup failed"
-
-# Setup Ethernet LAN interface
-log "Setting up Ethernet LAN interface"
-setup_eth_lan_interface || log "Warning: Ethernet LAN interface setup failed"
-
-# Setup dnsmasq for DHCP and DNS
-log "Setting up dnsmasq configuration"
-setup_dnsmasq || log "Warning: dnsmasq setup failed"
-
-log "==== Mesh network setup complete ===="
+log "==== MESH NETWORK SETUP COMPLETE ===="
 
 # If running as a service, start monitoring
 if [ "${1}" = "service" ]; then
-    log "==== Starting monitoring service ===="
+    log "==== STARTING MONITORING SERVICE ===="
     monitor_mesh_network
 fi

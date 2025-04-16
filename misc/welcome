@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# This is a welcome message that displays when you log in to the system. It requires bc to be installed. 'apt install bc'
+# It displays the current time, the network interfaces and their IPv4 addresses, the temperatures of the two thermal zones, and the CPU usage.
+
+# put this file in /usr/sbin/ and make it executable with 'sudo chmod +x /usr/sbin/welcome'
+# add 'welcome' to the bottom of your ~/.bashrc file
+
 # Welcome Message
 echo -e "\nWelcome to MOBTAK"
 echo -e "\nMobile Team Awareness Kit\n"
