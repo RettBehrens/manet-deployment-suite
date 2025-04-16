@@ -10,7 +10,6 @@ fi
 echo "Disabling dnsmasq and hostapd from starting automatically..."
 systemctl disable dnsmasq.service > /dev/null 2>&1
 systemctl disable hostapd.service > /dev/null 2>&1
-systemctl daemon-reload > /dev/null 2>&1
 
 # Create mesh-network directory
 mkdir -p /etc/mesh-network
@@ -27,6 +26,9 @@ echo "Setting permissions..."
 chmod 644 /etc/systemd/system/mesh-network.service
 chmod +x /usr/sbin/mesh-network.sh
 chmod +x /usr/sbin/mesh-network-stop.sh
+
+# Reload systemd to recognize new service
+systemctl daemon-reload > /dev/null 2>&1
 
 echo "Setup complete. Files have been moved and permissions set."
 echo "You can now edit /etc/mesh-network/mesh-config.conf and start the service with:"
