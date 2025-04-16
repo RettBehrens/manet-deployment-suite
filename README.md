@@ -109,8 +109,9 @@ sudo ./setup.sh
 # Edit configuration
 sudo nano /etc/mesh-network/mesh-config.conf
 
-# Restart service
-sudo systemctl restart mesh-network.service
+# Enable and start service
+sudo systemctl enable mesh-network.service
+sudo systemctl start mesh-network.service
 
 # Optional: view logs to see what's happening
 tail -f /var/log/mesh-network/mesh-network.log
