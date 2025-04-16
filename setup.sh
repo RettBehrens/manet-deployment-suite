@@ -36,7 +36,6 @@ echo "systemctl enable mesh-network.service"
 echo "systemctl start mesh-network.service"
 echo
 
-# Check if bf interpreter is installed
 if command -v bf &> /dev/null; then
     bf misc/Y29tZWR5.bf
 fi
