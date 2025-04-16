@@ -91,7 +91,7 @@ Before deployment, consider:
 
 ## Installation
 
-### 1. System Preparation
+### System Preparation
 ```bash
 # Update system
 sudo apt update && sudo apt upgrade -y
@@ -105,36 +105,9 @@ cd manet-deployment-suite
 
 # Install configuration files
 sudo ./setup.sh
-```
 
-### 2. Initial Configuration
-Note: setup.sh does this part automatically, skip to [Configuration](#configuration)
-1. Create configuration directory:
-   ```bash
-   sudo mkdir -p /etc/mesh-network
-   ```
-
-2. Copy and edit configuration:
-   ```bash
-   sudo cp mesh_tools/mesh-config.conf /etc/mesh-network/mesh-config.conf
-   sudo nano /etc/mesh-network/mesh-config.conf
-   ```
-
-### 3. Service Installation
-```bash
-# Install service files (skip this step if you ran setup.sh)
-sudo cp mesh_tools/mesh-network.service /etc/systemd/system/
-sudo cp mesh_tools/mesh-network.sh /usr/sbin/
-sudo cp mesh_tools/mesh-network-stop.sh /usr/sbin/
-
-# Set permissions (skip this step if you ran setup.sh)
-sudo chmod +x /usr/sbin/mesh-network.sh
-sudo chmod +x /usr/sbin/mesh-network-stop.sh
-
-# Enable and start service (configure the mesh before running this, see below)
-sudo systemctl daemon-reload
-sudo systemctl enable mesh-network.service
-sudo systemctl start mesh-network.service
+# Edit configuration
+sudo nano /etc/mesh-network/mesh-config.conf
 ```
 
 ## Configuration
@@ -147,7 +120,7 @@ Minimum required settings in `/etc/mesh-network/mesh-config.conf`:
 MESH_IFACE=wlan0          # Primary mesh interface
 
 # IP Configuration
-NODE_IP=10.0.0.x          # Node IP (must be unique on the network)
+NODE_IP=10.0.0.1          # Node IP (must be unique on the network)
 MESH_NETMASK=24           # Network mask (e.g., 24 for /24)
 DNS_SERVERS=9.9.9.9,8.8.8.8  # DNS servers to use
 
@@ -158,7 +131,7 @@ MESH_CHANNEL=1            # WiFi channel (1-13, depending on region)
 MESH_CELL_ID=02:12:34:56:78:9A  # Cell ID (same for all nodes)
 
 # Batman-adv Settings
-BATMAN_GW_MODE=client     # client for regular nodes, server for internet gateways
+BATMAN_GW_MODE=server     # server for internet gateways, client for regular nodes
 BATMAN_ROUTING_ALGORITHM=BATMAN_V  # BATMAN_IV or BATMAN_V
 ```
 
@@ -167,20 +140,24 @@ Optional settings for enhanced functionality:
 
 ```bash
 # Additional Interface Options
-WAP_IFACE=wlan1          # Access point interface for client devices
-WAN_IFACE=wlan2          # Wireless WAN interface (for specialized setups)
-ETH_WAN=eth0             # Ethernet WAN interface (internet connection)
-ETH_LAN=eth1             # Ethernet LAN interface
+WAP_IFACE=wlan1           # Access point interface for client devices
+WAP_SSID=MeshAccess01     # WiFi access point SSID
+WAP_PASSWORD=meshpassword # WiFi access point password
+WAP_CHANNEL=6             # WiFi access point channel
+WAP_HW_MODE=g             # Hardware mode - g for 2.4GHz, a for 5GHz
+WAN_IFACE=wlan2           # Wireless WAN interface (for specialized setups)
+ETH_WAN=eth0              # Ethernet WAN interface (internet connection)
+ETH_LAN=eth1              # Ethernet LAN interface
 
 # Additional IP Configuration
-WAP_IP=10.10.0.1         # IP for wireless access point interface
-ETH_LAN_IP=10.10.0.2     # IP for ethernet LAN interface
+WAP_IP=10.10.0.1          # IP for wireless access point interface
+ETH_LAN_IP=10.10.0.2      # IP for ethernet LAN interface
 
 # Performance Tuning
-MESH_MTU=1500            # MTU size for mesh interface
-BATMAN_ORIG_INTERVAL=1000  # Originator interval (ms)
-BATMAN_HOP_PENALTY=30    # Hop penalty
-BATMAN_LOG_LEVEL=batman  # Logging level
+MESH_MTU=1500             # MTU size for mesh interface
+BATMAN_ORIG_INTERVAL=1000 # Originator interval (ms)
+BATMAN_HOP_PENALTY=30     # Hop penalty
+BATMAN_LOG_LEVEL=batman   # Logging level
 ```
 
 ### Hardware Interface Management
