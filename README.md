@@ -100,7 +100,7 @@ sudo apt update && sudo apt upgrade -y
 sudo apt install -y git batctl iw wireless-tools net-tools bridge-utils iptables dnsmasq hostapd arping arp-scan
 
 # Clone repository
-git clone https://github.com/ifHoncho/mobile-ad-hoc-deployment-suite.git
+git clone https://github.com/ifHoncho/manet-deployment-suite.git
 cd manet-deployment-suite
 
 # Install configuration files
@@ -120,7 +120,8 @@ tail -f /var/log/mesh-network/mesh-network.log
 ## Configuration
 
 ### Basic Configuration
-Minimum required settings in `/etc/mesh-network/mesh-config.conf`:
+Minimum required settings in `/etc/mesh-network/mesh-config.conf`
+Most of these can be left as is, the main things you will need to change are the NODE_IP, since each node needs a unique IP address. And the MESH_IFACE which needs to match whatever WiFi interface you're using for the mesh. More details are commented in the actual config file.
 
 ```bash
 # Interface Configuration
@@ -129,7 +130,7 @@ MESH_IFACE=wlan0          # Primary mesh interface
 # IP Configuration
 NODE_IP=10.0.0.1          # Node IP (must be unique on the network)
 MESH_NETMASK=24           # Network mask (e.g., 24 for /24)
-DNS_SERVERS=9.9.9.9,8.8.8.8  # DNS servers to use
+DNS_SERVERS=9.9.9.9,8.8.8.8,1.1.1.1  # DNS servers to use
 
 # Mesh Parameters
 MESH_MODE=ad-hoc          # Must be set to ad-hoc
@@ -138,8 +139,6 @@ MESH_CHANNEL=1            # WiFi channel (1-13, depending on region)
 MESH_CELL_ID=02:12:34:56:78:9A  # Cell ID (same for all nodes)
 
 # Batman-adv Settings
-BATMAN_GW_MODE=server     # server for internet gateways, client for regular nodes
-BATMAN_ROUTING_ALGORITHM=BATMAN_V  # BATMAN_IV or BATMAN_V
 ```
 
 ### Advanced Configuration
@@ -152,7 +151,6 @@ WAP_SSID=MeshAccess01     # WiFi access point SSID
 WAP_PASSWORD=meshpassword # WiFi access point password
 WAP_CHANNEL=6             # WiFi access point channel
 WAP_HW_MODE=g             # Hardware mode - g for 2.4GHz, a for 5GHz
-WAN_IFACE=wlan2           # Wireless WAN interface (for specialized setups)
 ETH_WAN=eth0              # Ethernet WAN interface (internet connection)
 ETH_LAN=eth1              # Ethernet LAN interface
 
@@ -164,7 +162,7 @@ ETH_LAN_IP=10.10.0.2      # IP for ethernet LAN interface
 MESH_MTU=1500             # MTU size for mesh interface
 BATMAN_ORIG_INTERVAL=1000 # Originator interval (ms)
 BATMAN_HOP_PENALTY=30     # Hop penalty
-BATMAN_LOG_LEVEL=batman   # Logging level
+BATMAN_ROUTING_ALGORITHM=BATMAN_V  # BATMAN_IV or BATMAN_V
 ```
 
 ### Hardware Interface Management
