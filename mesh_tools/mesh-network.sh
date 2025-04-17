@@ -190,7 +190,7 @@ validate_config() {
     local required_vars=(
         "MESH_IFACE" "MESH_MTU" "MESH_MODE" "MESH_ESSID" 
         "MESH_CHANNEL" "MESH_CELL_ID" "NODE_IP" 
-        "MESH_NETMASK" "BATMAN_GW_MODE" "BATMAN_ROUTING_ALGORITHM"
+        "MESH_NETMASK" "BATMAN_ROUTING_ALGORITHM"
     )
     
     for var in "${required_vars[@]}"; do
@@ -208,12 +208,17 @@ validate_config() {
     if ! [[ "${NODE_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         error "Invalid NODE_IP format: ${NODE_IP}"
     fi
+    
+    # Set auto mode always - no user configuration needed
+    BATMAN_GW_MODE="auto"
+    log "Using auto mode: server when WAN is available, client when unavailable"
 }
 
 # Function to get gateway MACs from batctl gwl
 get_gateway_macs() {
-    # Get gateway list and filter out the header line and extract the Router MAC
-    batctl gwl -n 2>/dev/null | grep -v "B.A.T.M.A.N." | grep "^*" | awk '{print $2}'
+    # Get gateway list, filter out the header line, and extract the Router MAC
+    # The gateways are shown in the first column, without any special prefix
+    batctl gwl -n 2>/dev/null | grep -v "B.A.T.M.A.N." | awk '{print $1}'
 }
 
 # Function to get client list from batman-adv
@@ -229,7 +234,7 @@ is_gateway_available() {
     if [ "${BATMAN_GW_MODE}" = "server" ]; then
         # Get our own bat0 MAC
         local our_mac
-        our_mac=$(batctl meshif bat0 interface show 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
+        our_mac=$(batctl o 2>/dev/null | head -n 1 | grep -oE 'bat0/([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | cut -d'/' -f2 | cut -d' ' -f1)
         
         # If this is checking our own MAC, return true
         if [ "${gateway_mac}" = "${our_mac}" ]; then
@@ -299,12 +304,8 @@ detect_gateway_ip() {
         return 1
     fi
     
-    # If we're in server mode, we are our own gateway
-    if [ "${BATMAN_GW_MODE}" = "server" ]; then
-        log "Running in server mode, using own IP as gateway" >&2
-        echo "${NODE_IP}"
-        return 0
-    fi
+    # IMPORTANT: Never use our own IP as gateway, even in server mode
+    # We need to find other gateways in the mesh network
     
     # Get list of gateway MACs from batctl gwl
     log "Getting list of batman-adv gateways" >&2
@@ -321,15 +322,29 @@ detect_gateway_ip() {
     # Clean expired entries from translation table
     clean_translation_table
     
+    # Get our own virtual MAC for comparison to avoid using our own IP
+    local our_virtual_mac
+    our_virtual_mac=$(batctl o 2>/dev/null | head -n 1 | grep -oE 'bat0/([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | cut -d'/' -f2 | cut -d' ' -f1)
+    log "Our own virtual MAC: ${our_virtual_mac}" >&2
+    
     # Create a list of known good gateways
     local known_gateways=""
     
     # First try to find gateway using translation table
     for gateway_mac in ${gateway_macs}; do
+        # Skip if this is our own MAC
+        if [ "${gateway_mac}" = "${our_virtual_mac}" ]; then
+            log "Skipping our own MAC: ${gateway_mac}" >&2
+            continue
+        fi
+        
         # Search translation table for any IP that maps to this gateway MAC
         while IFS='|' read -r timestamp ip bat0_mac hw_mac; do
             # Skip empty lines
             [ -z "${timestamp}" ] && continue
+            
+            # Skip our own IP
+            [ "${ip}" = "${NODE_IP}" ] && continue
             
             if [ "${bat0_mac}" = "${gateway_mac}" ]; then
                 log "Found gateway in translation table: ${ip} (MAC: ${bat0_mac})" >&2
@@ -525,6 +540,7 @@ detect_gateway_ip() {
 # Function to configure routing
 configure_routing() {
     local gateway_ip="$1"
+    local metric="${2:-100}"  # Default metric of 100 if not specified
     
     # Validate input
     if [ -z "${gateway_ip}" ] || ! [[ "${gateway_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -532,35 +548,86 @@ configure_routing() {
         return 1
     fi
     
-    log "Configuring routing for gateway ${gateway_ip}"
+    # Never use our own IP as a mesh gateway
+    if [ "${gateway_ip}" = "${NODE_IP}" ]; then
+        log "WARNING: Attempted to use our own IP (${NODE_IP}) as gateway. This is not allowed."
+        return 1
+    fi
     
-    # For server mode, we are the gateway
-    if [ "${BATMAN_GW_MODE}" = "server" ] && [ -n "${VALID_WAN}" ]; then
-        log "Server mode: Setting up routing through ${VALID_WAN}"
+    log "Configuring routing for gateway ${gateway_ip} with metric ${metric}"
+    
+    # For server mode, we set up routing through WAN
+    if [ "${BATMAN_GW_MODE}" = "server" ] && [ -n "${active_wan}" ]; then
+        log "Server mode: Setting up routing through ${active_wan}"
+        
+        # Get the default gateway for the WAN interface
+        local wan_gateway=$(ip route show | grep "default.*dev ${active_wan}" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -n1)
+        
+        if [ -z "${wan_gateway}" ]; then
+            log "Warning: No default gateway found for ${active_wan}"
+            # Try to get the gateway from the subnet
+            local wan_ip=$(ip -4 addr show dev "${active_wan}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+            if [ -n "${wan_ip}" ]; then
+                local wan_subnet=$(echo "${wan_ip}" | cut -d. -f1-3)
+                wan_gateway="${wan_subnet}.1"
+                log "Using assumed gateway ${wan_gateway} for ${active_wan}"
+            
+                # Try to add a default route if none exists
+                if ! ip route show | grep -q "default.*${active_wan}"; then
+                    log "Adding default route via ${wan_gateway} dev ${active_wan}"
+                    ip route add default via "${wan_gateway}" dev "${active_wan}" metric 50
+                fi
+            else
+                log "Error: Could not determine a gateway for ${active_wan}"
+                return 1
+            fi
+        fi
+        
+        # Clean up existing NAT rules to avoid duplicates
+        iptables -t nat -F POSTROUTING
         
         # Set up NAT and routing through WAN interface
-        iptables -t nat -A POSTROUTING -o "${VALID_WAN}" -j MASQUERADE
-        iptables -A FORWARD -i bat0 -o "${VALID_WAN}" -j ACCEPT
-        iptables -A FORWARD -i "${VALID_WAN}" -o bat0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -t nat -A POSTROUTING -o "${active_wan}" -j MASQUERADE
+        iptables -A FORWARD -i bat0 -o "${active_wan}" -j ACCEPT
+        iptables -A FORWARD -i "${active_wan}" -o bat0 -m state --state RELATED,ESTABLISHED -j ACCEPT
         
-        # Don't touch the default route, let DHCP handle it
+        # Add routes for LAN interfaces if they exist
+        for lan_iface in "${VALID_AP}" "${VALID_ETH_LAN}"; do
+            if [ -n "${lan_iface}" ]; then
+                iptables -A FORWARD -i "${lan_iface}" -o "${active_wan}" -j ACCEPT
+                iptables -A FORWARD -i "${active_wan}" -o "${lan_iface}" -m state --state RELATED,ESTABLISHED -j ACCEPT
+                
+                # Get LAN IP and subnet
+                local lan_ip=$(ip -4 addr show dev "${lan_iface}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+                if [ -n "${lan_ip}" ]; then
+                    # Add NAT for LAN traffic
+                    iptables -t nat -A POSTROUTING -s "$(echo "${lan_ip}" | cut -d. -f1-3).0/24" -o "${active_wan}" -j MASQUERADE
+                    log "Enabled NAT for ${lan_iface} subnet $(echo "${lan_ip}" | cut -d. -f1-3).0/24"
+                fi
+            fi
+        done
+        
+        log "Server mode routing through ${active_wan} via ${wan_gateway} configured"
         return 0
     fi
     
-    # For client mode
-    log "Setting up default route via ${gateway_ip}"
-    # Remove any existing default routes
-    if ip route del default 2>/dev/null; then
-        log "Successfully removed existing default route"
-    else 
-        log "No existing default route to remove"
+    # For client mode or adding a specific route
+    log "Setting up route via ${gateway_ip} with metric ${metric}"
+    
+    # Check if the route already exists
+    if ip route show | grep -q "default via ${gateway_ip} dev bat0 metric ${metric}"; then
+        log "Route already exists, skipping"
+        return 0
     fi
-    if ip route add default via "${gateway_ip}" dev bat0; then
-        log "Successfully added new default route via ${gateway_ip}"
+    
+    # Add the route with the specified metric
+    if ip route add default via "${gateway_ip}" dev bat0 metric "${metric}"; then
+        log "Successfully added route via ${gateway_ip} with metric ${metric}"
+        return 0
     else
-        log "Failed to add default route via ${gateway_ip}"
+        log "Failed to add route via ${gateway_ip}"
+        return 1
     fi
-    return 0
 }
 
 # Function to get valid interfaces
@@ -1022,9 +1089,12 @@ setup_firewall() {
 setup_batman_params() {
     log "Setting BATMAN-adv parameters"
     
+    # If BATMAN_GW_MODE is auto, don't set it here - it will be handled by the dynamic routing
+    if [ "${BATMAN_GW_MODE}" != "auto" ]; then
     if ! batctl gw_mode "${BATMAN_GW_MODE}"; then
         log "Error: Failed to set gateway mode"
         return 1
+        fi
     fi
 
     if ! batctl orig_interval "${BATMAN_ORIG_INTERVAL}"; then
@@ -1140,19 +1210,93 @@ setup_batman_interface() {
     return 0
 }
 
-# Aggressively scan for gateways and configure routing; runs initially to get networking up quickly. Will fall back to monitoring loop if no gateways are found.
+# Update setup_initial_routing to handle auto mode consistently
+
 setup_initial_routing() {
-    # Configure routing based on mode
-    if [ "${BATMAN_GW_MODE}" = "server" ]; then
-        log "Running in server mode, configuring gateway rules"
-        if [ -n "${VALID_WAN}" ]; then
-            configure_routing "${NODE_IP}" || log "Warning: Failed to configure initial routing"
-        else
-            log "Warning: Server mode but no WAN interface available"
+    log "Setting up initial routing..."
+    
+    # First check WAN connectivity on all possible interfaces
+    local wan_available=false
+    local active_wan=""
+    
+    # Try both potential WAN interfaces
+    for iface in "${VALID_WAN}" "${ETH_WAN}"; do
+        if [ -n "${iface}" ] && check_wan_connectivity "${iface}"; then
+            wan_available=true
+            active_wan="${iface}"
+            log "Internet connectivity available via ${active_wan}"
+            break
+        fi
+    done
+    
+    # Set initial gateway mode based on WAN availability
+    # Only auto-switch if in auto mode
+    if [ "${wan_available}" = "true" ]; then
+        log "WAN is available, setting up server mode"
+        batctl gw_mode server
+        # Update the global variable for consistency
+        BATMAN_GW_MODE="server"
+        
+        # Set up NAT and routing for server mode
+        if [ -n "${active_wan}" ]; then
+            # Get WAN gateway
+            local wan_gateway=$(ip route show | grep "default.*dev ${active_wan}" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -n1)
+            
+            # Set up NAT
+            iptables -t nat -F POSTROUTING
+            iptables -t nat -A POSTROUTING -o "${active_wan}" -j MASQUERADE
+            
+            log "Configured NAT from mesh to WAN interface ${active_wan}"
+        fi
+        
+        # Try to find external mesh gateways for fallback
+        log "Attempting to configure fallback route via mesh network..."
+        local fallback_gateway=""
+        
+        # Wait for mesh to stabilize briefly
+        sleep 3
+        
+        # Proactively trigger batman-adv discovery
+        batctl o -n >/dev/null 2>&1 || true
+        ping -c 1 -b 10.0.0.255 >/dev/null 2>&1 || true
+        
+        # Try to detect other gateways in the mesh (not our own IP)
+        local our_mac=$(batctl o 2>/dev/null | head -n 1 | grep -oE 'bat0/([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | cut -d'/' -f2 | cut -d' ' -f1)
+        
+        # Try to detect a gateway in the mesh
+        fallback_gateway=$(detect_gateway_ip)
+        
+        if [ -n "${fallback_gateway}" ] && [ "${fallback_gateway}" != "${NODE_IP}" ]; then
+            log "Found potential fallback gateway: ${fallback_gateway}"
+            
+            # Add fallback route with higher metric (lower priority)
+            if ip route add default via "${fallback_gateway}" dev bat0 metric 200; then
+                log "Successfully added fallback route via ${fallback_gateway} (metric 200)"
+            else
+                log "Failed to add fallback route"
         fi
     else
-        # Client mode: Attempt detection immediately with multiple retries
-        log "Client mode: Attempting initial gateway detection with retries..."
+            log "No suitable external fallback gateway found, will be managed by monitoring service"
+        fi
+    else
+        # No WAN available
+        log "No WAN available, setting up client mode"
+        batctl gw_mode client
+        # Update the global variable for consistency
+        BATMAN_GW_MODE="client"
+        
+        # Set up primary route via mesh
+        setup_initial_client_routing
+    fi
+    
+    # Display routing table for debugging
+    log "Initial routing table configuration:"
+    ip route | grep default || log "No default routes configured"
+}
+
+# Initial routing for client mode
+setup_initial_client_routing() {
+    log "Attempting initial gateway detection with retries..."
         local initial_gateway=""
         local retry_count=0
         local max_retries=5
@@ -1201,12 +1345,20 @@ setup_initial_routing() {
             
             if [ -n "$initial_gateway" ]; then
                 log "Initial gateway detection successful: ${initial_gateway}"
-                if configure_routing "${initial_gateway}"; then
-                    log "Successfully configured initial route via ${initial_gateway} dev bat0."
+            
+            # Check if we already have this route
+            if ! ip route show | grep -q "default via ${initial_gateway} dev bat0"; then
+                # Only remove existing routes via bat0, preserve other routes
+                ip route del default dev bat0 2>/dev/null || true
+                
+                # Add primary route via mesh with appropriate metric
+                if ip route add default via "${initial_gateway}" dev bat0 metric 100; then
+                    log "Successfully added primary route via ${initial_gateway} (metric 100)"
                     break
                 else
                     log "Warning: Failed to configure initial routing for gateway ${initial_gateway}."
                     initial_gateway=""  # Reset to trigger another retry
+                fi
                 fi
             else
                 # Extract and cache mesh nodes found during scan if any
@@ -1228,10 +1380,36 @@ setup_initial_routing() {
             
             retry_count=$((retry_count+1))
         done
+    
+    # Even in client mode, check if a WAN interface is connected but just doesn't have internet
+    # It might still be useful as a fallback route
+    for iface in "${VALID_WAN}" "${ETH_WAN}"; do
+        if [ -n "${iface}" ]; then
+            # Ensure interface is up
+            ip link set dev "${iface}" up 2>/dev/null || true
+            
+            if ip link show "${iface}" >/dev/null 2>&1 && 
+               ip link show "${iface}" | grep -q "UP" && 
+               ip addr show dev "${iface}" | grep -q "inet " &&
+               ! ip link show "${iface}" | grep -q "NO-CARRIER"; then
+                
+                # Get the default gateway for this interface if available
+                local wan_gateway=$(ip route show | grep "default.*dev ${iface}" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -n1)
+                
+                if [ -n "${wan_gateway}" ]; then
+                    log "Adding fallback route via ${iface} gateway ${wan_gateway} (metric 300)"
+                    if ip route add default via "${wan_gateway}" dev "${iface}" metric 300; then
+                        log "Successfully added fallback route via ${wan_gateway}"
+                    else
+                        log "Warning: Failed to add fallback route"
+                    fi
+                fi
+            fi
+        fi
+        done
         
         if [ -z "$initial_gateway" ]; then
             log "Initial gateway detection failed after $max_retries attempts. Will rely on monitoring loop."
-        fi
     fi
 }
 
@@ -1257,9 +1435,133 @@ check_requirements() {
 # MONITORING AND SERVICE FUNCTIONS
 #######################################
 
-# Monitor mesh network service mode
+# Fix the WAN connectivity check to be more reliable
+check_wan_connectivity() {
+    local wan_iface="$1"
+    local log_check="$2"  # Optional parameter to control logging frequency
+    
+    # Check if interface exists and is up
+    if ! ip link show "$wan_iface" >/dev/null 2>&1 || ! ip link show "$wan_iface" | grep -q "UP"; then
+        # Only log if log_check is 0 or not set
+        if [ -z "$log_check" ] || [ "$log_check" -eq 0 ] || [ $(($log_check % 6)) -eq 0 ]; then
+            log "WAN check: Interface $wan_iface is down or doesn't exist"
+        fi
+        return 1
+    fi
+    
+    # Check if interface has an IP address
+    if ! ip addr show dev "$wan_iface" | grep -q "inet "; then
+        if [ -z "$log_check" ] || [ "$log_check" -eq 0 ] || [ $(($log_check % 6)) -eq 0 ]; then
+            log "WAN check: Interface $wan_iface has no IP address"
+        fi
+        return 1
+    fi
+    
+    # Ensure the interface is not in "linkdown" state
+    if ip link show "$wan_iface" | grep -q "NO-CARRIER" || ip link show "$wan_iface" | grep -q "DORMANT"; then
+        if [ -z "$log_check" ] || [ "$log_check" -eq 0 ] || [ $(($log_check % 6)) -eq 0 ]; then
+            log "WAN interface $wan_iface has no carrier signal"
+        fi
+        return 1
+    fi
+    
+    # Check if default route exists through this interface
+    if ! ip route show | grep -q "default.*dev ${wan_iface}"; then
+        # Try to grab the default gateway from DHCP
+        local default_gw=$(ip route show dev "${wan_iface}" | grep -v "linkdown" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -n1)
+        if [ -z "$default_gw" ]; then
+            # Try to guess gateway from interface IP
+            local wan_ip=$(ip -4 addr show dev "${wan_iface}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+            if [ -n "$wan_ip" ]; then
+                default_gw="${wan_ip%.*}.1"  # Assume gateway is .1 in subnet
+            fi
+        fi
+        
+        if [ -n "${default_gw}" ]; then
+            log "Adding default route via ${default_gw} through ${wan_iface}"
+            ip route add default via "${default_gw}" dev "${wan_iface}" >/dev/null 2>&1 || true
+        else
+            if [ -z "$log_check" ] || [ "$log_check" -eq 0 ] || [ $(($log_check % 6)) -eq 0 ]; then
+                log "No default gateway found for ${wan_iface}"
+            fi
+            return 1
+        fi
+    fi
+    
+    # Try multiple connectivity tests for more reliable detection
+    local success=0
+    
+    # Test 1: Try to ping the default gateway first
+    local default_gw=$(ip route show | grep "default.*dev ${wan_iface}" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -n1)
+    if [ -n "${default_gw}" ] && ping -c 1 -W 1 "${default_gw}" >/dev/null 2>&1; then
+        success=$((success + 1))
+        log "WAN check: Default gateway ${default_gw} is reachable via ${wan_iface}"
+    fi
+    
+    # Test 2: Try multiple DNS servers (in case one is blocked)
+    for dns in 9.9.9.9 8.8.8.8 1.1.1.1 208.67.222.222; do
+        if timeout 2 ping -c 1 -W 1 ${dns} >/dev/null 2>&1; then
+            success=$((success + 1))
+            log "WAN check: DNS server ${dns} is reachable via ${wan_iface}"
+            break  # One successful DNS ping is enough
+        fi
+    done
+    
+    # Success if either the gateway is reachable or any DNS server is reachable
+    if [ $success -ge 1 ]; then
+        return 0
+    fi
+    
+    if [ -z "$log_check" ] || [ "$log_check" -eq 0 ] || [ $(($log_check % 6)) -eq 0 ]; then
+        log "WAN check: No internet connectivity detected on ${wan_iface}"
+    fi
+    return 1
+}
+
+# Fix monitor_mesh_network function for better mode stability and fallback routes
 monitor_mesh_network() {
-    local RETRY_INTERVAL=10  # Time between retries in seconds
+    local RETRY_INTERVAL=5  # Time between retries in seconds
+    local current_mode="client"  # Start in client mode, will switch based on WAN
+    local current_gateway=""  # Track current gateway IP
+    local last_known_mesh_gateway=""  # Track last known good mesh gateway for fallback
+    local wan_available=false  # Track WAN availability
+    local previous_wan_state=false  # Track previous WAN state for change detection
+    local primary_route_configured=false  # Track if primary route is configured
+    local fallback_route_configured=false  # Track if fallback route is configured
+    local active_wan=""  # Track active WAN interface
+    local force_mode_switching=true  # Always allow mode switching
+    local wan_stable_count=0  # Counter for stable WAN detection (debouncing)
+    local wan_required_stable_count=1  # Required number of consecutive stable checks (more responsive)
+    local wan_fail_count=0  # Counter for WAN failure detection (debouncing)
+    local wan_required_fail_count=2  # Required number of consecutive failures (more stable)
+    
+    # Check initial routing table to set tracking variables correctly
+    if ip route show | grep -q "default via .* dev bat0 metric 100"; then
+        primary_route_configured=true
+        current_gateway=$(ip route show | grep "default via .* dev bat0 metric 100" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}')
+        log "Found existing primary route via ${current_gateway}"
+        
+        # Skip checking if route is via our own IP, we will rely on detect_gateway_ip 
+        # to find appropriate mesh gateways
+        if [ -n "${current_gateway}" ] && [ "${current_gateway}" != "${NODE_IP}" ]; then
+            last_known_mesh_gateway="${current_gateway}"
+            log "Saving ${last_known_mesh_gateway} as last known mesh gateway"
+        fi
+    fi
+    
+    # Check if there are any fallback routes with metric 200 (typically mesh fallback routes)
+    if ip route show | grep -q "default via .* dev bat0 metric 200"; then
+        fallback_route_configured=true
+        local fallback=$(ip route show | grep "default via .* dev bat0 metric 200" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}')
+        if [ -n "${fallback}" ] && [ "${fallback}" != "${NODE_IP}" ] && [ -z "${last_known_mesh_gateway}" ]; then
+            last_known_mesh_gateway="${fallback}"
+            log "Found fallback route via ${fallback}, saving as potential gateway"
+        fi
+    fi
+    
+    log "Starting mesh network monitoring with dynamic routing..."
+    log "Initial mode: ${current_mode} (dynamic mode switching always enabled)"
+    log "Current routes: Primary route configured: ${primary_route_configured}, Fallback route configured: ${fallback_route_configured}"
     
     while true; do
         # Check if bat0 interface is up
@@ -1269,45 +1571,469 @@ monitor_mesh_network() {
             continue
         fi
         
-        # Different monitoring based on mode
-        if [ "${BATMAN_GW_MODE}" = "server" ]; then
-            # For server mode, just verify NAT and forwarding are working
-            if ! iptables -t nat -L POSTROUTING -v | grep -q "${VALID_WAN}"; then
-                log "NAT rules missing, reconfiguring..."
-                configure_routing "${NODE_IP}"
+        # Check WAN connectivity on all possible interfaces
+        local current_wan_status=false
+        active_wan=""
+        
+        # Try both potential WAN interfaces
+        for iface in "${VALID_WAN}" "${ETH_WAN}"; do
+            if [ -n "${iface}" ]; then
+                # Make sure interface is up first
+                ip link set dev "${iface}" up 2>/dev/null || true
+                
+                # Check if the interface is connected at the physical level
+                if ip link show "${iface}" | grep -q "NO-CARRIER"; then
+                    # Controlled logging based on counter
+                    if [ $((wan_fail_count % 6)) -eq 0 ]; then
+                        log "WAN interface ${iface} has no carrier signal"
+                    fi
+                    continue
+                fi
+                
+                # Check if the interface has an IP
+                if ! ip addr show dev "${iface}" | grep -q "inet "; then
+                    # Controlled logging based on counter
+                    if [ $((wan_fail_count % 6)) -eq 0 ]; then
+                        log "WAN interface ${iface} has no IP address"
+                    fi
+                    continue
+                fi
+                
+                # Check full connectivity - pass counter to control logging frequency
+                if check_wan_connectivity "${iface}" "${wan_fail_count}"; then
+                    current_wan_status=true
+                    active_wan="${iface}"
+                    log "Internet connectivity available via ${active_wan}"
+                    break
+                else
+                    # Controlled logging based on counter
+                    if [ $((wan_fail_count % 6)) -eq 0 ]; then
+                        log "WAN interface ${iface} is up but internet connectivity test failed"
+                    fi
+                fi
+            fi
+        done
+        
+        # Implement debouncing for WAN status changes
+        if [ "${current_wan_status}" = "true" ]; then
+            # WAN is currently available
+            wan_fail_count=0  # Reset failure counter
+            wan_stable_count=$((wan_stable_count + 1))
+            
+            if [ ${wan_stable_count} -ge ${wan_required_stable_count} ] && [ "${wan_available}" = "false" ]; then
+                # WAN has been stable for required number of checks, change status
+                previous_wan_state=${wan_available}
+                wan_available=true
+                log "WAN connection detected and stabilized (previously unavailable)"
             fi
         else
-            # For client mode, check gateway and routing
-            # Only check for default routes via bat0 interface
-            if ! ip route show | grep -q "^default.*dev bat0"; then
-                log "No default route found via bat0, checking for gateway..."
-                gateway_ip=$(detect_gateway_ip)
+            # WAN is currently unavailable
+            wan_stable_count=0  # Reset stability counter
+            wan_fail_count=$((wan_fail_count + 1))
+            
+            # Cap the fail counter at exactly the required threshold for display purposes
+            if [ ${wan_fail_count} -gt ${wan_required_fail_count} ]; then
+                wan_fail_count=${wan_required_fail_count}
+            fi
+            
+            if [ ${wan_fail_count} -ge ${wan_required_fail_count} ] && [ "${wan_available}" = "true" ]; then
+                # WAN has been down for required number of checks, change status
+                previous_wan_state=${wan_available}
+                wan_available=false
+                log "WAN connection lost and confirmed down after ${wan_required_fail_count} checks"
                 
-                if [ -n "${gateway_ip}" ]; then
-                    if configure_routing "${gateway_ip}"; then
-                        sleep 1
-                        if ! ip route show | grep -q "^default.*dev bat0"; then
-                            log "Route verification failed, will retry"
+                # If we're in server mode, trigger mode switch now
+                if [ "${current_mode}" = "server" ]; then
+                    log "WAN down detected, switching to client mode"
+                    batctl gw_mode client
+                    current_mode="client"
+                    
+                    # Remove any stale routes
+                    for iface in "${VALID_WAN}" "${ETH_WAN}"; do
+                        if [ -n "${iface}" ]; then
+                            ip route del default dev "${iface}" 2>/dev/null || true
+                        fi
+                    done
+                    
+                    # Remove our own IP route if it exists
+                    ip route del default via "${NODE_IP}" dev bat0 2>/dev/null || true
+                    
+                    # Remove any bat0 routes with metric 100 - we'll redo this
+                    ip route del default dev bat0 metric 100 2>/dev/null || true
+                    
+                    # Reset for next loop iteration to find a gateway
+                    primary_route_configured=false
+                    fallback_route_configured=false
+                    
+                    # Set up NAT for wlan1 to bat0
+                    iptables -t nat -F POSTROUTING
+                    iptables -t nat -A POSTROUTING -o bat0 -j MASQUERADE
+                    iptables -A FORWARD -i wlan1 -o bat0 -j ACCEPT
+                    iptables -A FORWARD -i bat0 -o wlan1 -m state --state RELATED,ESTABLISHED -j ACCEPT
+                    
+                    log "Reconfigured to client mode, will search for mesh gateway in next cycle"
                             continue
                         fi
                     fi
                 fi
-            else
-                # Check if current gateway via bat0 is still valid
-                current_gateway=$(ip route show | grep "^default.*dev bat0" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-                if [ -n "${current_gateway}" ]; then
-                    unreachable=$(monitor_gateway "${current_gateway}")
-                    if [ "${unreachable}" = "true" ]; then
-                        log "Current mesh gateway ${current_gateway} is unreachable after multiple attempts"
-                        # Only delete the default route via bat0, not other default routes
-                        ip route del default dev bat0 2>/dev/null || true
-                    fi
+
+        # Determine if we need to switch modes based on WAN availability
+        if [ "${wan_available}" = "true" ] && [ "${current_mode}" != "server" ]; then
+            log "WAN is stable for ${wan_stable_count} checks, switching to server mode"
+            # Save the current bat0 gateway before switching
+            if [ -n "${current_gateway}" ] && [ "${current_gateway}" != "${NODE_IP}" ]; then
+                last_known_mesh_gateway="${current_gateway}"
+                log "Saved mesh gateway ${last_known_mesh_gateway} before switching to server mode"
+            fi
+            
+            batctl gw_mode server
+            current_mode="server"
+            
+            # Get the default gateway for the WAN interface
+            local wan_gateway=$(ip route show | grep "default.*dev ${active_wan}" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -n1)
+            if [ -z "${wan_gateway}" ]; then
+                # If no gateway is found, try to get one from subnet
+                local wan_ip=$(ip -4 addr show dev "${active_wan}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+                if [ -n "${wan_ip}" ]; then
+                    wan_gateway="${wan_ip%.*}.1"
+                    log "Using assumed gateway ${wan_gateway} for ${active_wan}"
                 fi
             fi
+            
+            if [ -n "${wan_gateway}" ]; then
+                # Ensure WAN has a default route with good metric
+                if ! ip route show | grep -q "default.*via ${wan_gateway}.*dev ${active_wan}"; then
+                    ip route add default via "${wan_gateway}" dev "${active_wan}" metric 50
+                    log "Added default route via ${wan_gateway} dev ${active_wan}"
+                fi
+                
+                # Setup NAT for WAN
+                iptables -t nat -F POSTROUTING
+                iptables -t nat -A POSTROUTING -o "${active_wan}" -j MASQUERADE
+                
+                # Configure forwarding
+                iptables -A FORWARD -i bat0 -o "${active_wan}" -j ACCEPT
+                iptables -A FORWARD -i "${active_wan}" -o bat0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+                
+                # Ensure LAN interfaces can access WAN
+                for lan_iface in "${VALID_AP}" "${VALID_ETH_LAN}"; do
+                    if [ -n "${lan_iface}" ]; then
+                        iptables -A FORWARD -i "${lan_iface}" -o "${active_wan}" -j ACCEPT
+                        iptables -A FORWARD -i "${active_wan}" -o "${lan_iface}" -m state --state RELATED,ESTABLISHED -j ACCEPT
+                        
+                        # Add NAT for LAN traffic
+                        local lan_ip=$(ip -4 addr show dev "${lan_iface}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+                        if [ -n "${lan_ip}" ]; then
+                            iptables -t nat -A POSTROUTING -s "${lan_ip%.*}.0/24" -o "${active_wan}" -j MASQUERADE
+                            log "Enabled NAT for ${lan_iface} subnet ${lan_ip%.*}.0/24"
+                        fi
+                    fi
+                done
+                
+                log "Successfully configured server mode routing through ${active_wan}"
+                primary_route_configured=true
+            else
+                log "Warning: Could not find or determine WAN gateway"
+            fi
+            
+            # In server mode with WAN connected, we should have a good gateway
+            # Set up a fallback route via mesh network
+            log "Setting up fallback route via mesh network"
+            setup_mesh_fallback_route
+        elif [ "${wan_available}" = "false" ] && [ "${current_mode}" != "client" ]; then
+            log "WAN is confirmed down, switching to client mode"
+            batctl gw_mode client
+            current_mode="client"
+            
+            # Clean up any "linkdown" routes through WAN interfaces
+            for iface in "${VALID_WAN}" "${ETH_WAN}"; do
+                if [ -n "${iface}" ]; then
+                    # Remove default routes through disconnected interfaces
+                    ip route show | grep "default.*dev ${iface}.*linkdown" | while read -r route; do
+                        log "Removing linkdown route: ${route}"
+                        ip route del default dev "${iface}" 2>/dev/null || true
+                    done
+                fi
+            done
+            
+            # Reset tracking variables
+            primary_route_configured=false
+            fallback_route_configured=false
+            
+            # Remove our own IP route if it exists (important fix)
+            ip route del default via "${NODE_IP}" dev bat0 2>/dev/null || true
+            
+            # Remove any bat0 routes with metric 100 - we'll redo this with proper gateway
+            ip route del default dev bat0 metric 100 2>/dev/null || true
+            
+            # Set up primary route via mesh
+            setup_mesh_primary_route
+        fi
+
+        # Manage routes based on current mode
+        if [ "${current_mode}" = "server" ]; then
+            # In server mode, verify NAT and forwarding are working
+            if [ "${wan_available}" = "true" ]; then
+                if ! iptables -t nat -L POSTROUTING -v 2>/dev/null | grep -q "${active_wan}"; then
+                    log "NAT rules missing or outdated, reconfiguring..."
+                    
+                    # Flush existing NAT rules and set up new ones
+                    iptables -t nat -F POSTROUTING
+                    iptables -t nat -A POSTROUTING -o "${active_wan}" -j MASQUERADE
+                    
+                    # Ensure forwarding is enabled
+                    iptables -A FORWARD -i bat0 -o "${active_wan}" -j ACCEPT
+                    iptables -A FORWARD -i "${active_wan}" -o bat0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+                    
+                    # Make sure LAN interfaces can also access the internet
+                    for lan_iface in "${VALID_AP}" "${VALID_ETH_LAN}"; do
+                        if [ -n "${lan_iface}" ]; then
+                            iptables -A FORWARD -i "${lan_iface}" -o "${active_wan}" -j ACCEPT
+                            iptables -A FORWARD -i "${active_wan}" -o "${lan_iface}" -m state --state RELATED,ESTABLISHED -j ACCEPT
+                        fi
+                    done
+                fi
+            else
+                # Server mode but WAN is down - force transition to client mode immediately
+                log "In server mode but WAN is down - forcing transition to client mode"
+                batctl gw_mode client
+                current_mode="client"
+                
+                # Remove any "linkdown" routes and our self-route
+                for iface in "${VALID_WAN}" "${ETH_WAN}"; do
+                    if [ -n "${iface}" ]; then
+                        ip route del default dev "${iface}" 2>/dev/null || true
+                    fi
+                done
+                
+                # Remove our own route if it exists
+                ip route del default via "${NODE_IP}" dev bat0 2>/dev/null || true
+                
+                # Remove any bat0 routes with metric 100 - we'll redo this with proper gateway
+                ip route del default dev bat0 metric 100 2>/dev/null || true
+                
+                # Set up proper mesh routing
+                setup_mesh_primary_route
+                
+                # Will continue to next loop iteration with new settings
+                continue
+            fi
+            
+            # In server mode, try to set up a fallback route via mesh if not already configured
+            if [ "${fallback_route_configured}" = "false" ] && [ "${current_mode}" = "server" ]; then
+                setup_mesh_fallback_route
+            elif [ -n "${current_gateway}" ]; then
+                # Check if fallback gateway is still valid
+                    unreachable=$(monitor_gateway "${current_gateway}")
+                    if [ "${unreachable}" = "true" ]; then
+                    log "Fallback gateway ${current_gateway} is unreachable, removing route"
+                    ip route del default via "${current_gateway}" dev bat0 metric 200 2>/dev/null || true
+                    fallback_route_configured=false
+                    current_gateway=""
+                    
+                    # Try to find a new fallback gateway
+                    setup_mesh_fallback_route
+                fi
+            fi
+            
+        else
+            # In client mode
+            
+            # Check if we have a primary route via the mesh
+            if [ "${primary_route_configured}" = "false" ]; then
+                setup_mesh_primary_route
+            elif [ -n "${current_gateway}" ]; then
+                # Verify the route still exists (in case it was removed externally)
+                if ! ip route show | grep -q "default via ${current_gateway} dev bat0"; then
+                    log "Primary route via ${current_gateway} is missing, will reconfigure"
+                    primary_route_configured=false
+                    setup_mesh_primary_route
+                    continue
+                fi
+                
+                # Check if current mesh gateway is still valid
+                unreachable=$(monitor_gateway "${current_gateway}")
+                if [ "${unreachable}" = "true" ]; then
+                    log "Current mesh gateway ${current_gateway} is unreachable, removing route"
+                    ip route del default via "${current_gateway}" dev bat0 2>/dev/null || true
+                    primary_route_configured=false
+                    current_gateway=""
+                    setup_mesh_primary_route
+                fi
+            fi
+            
+            # Even in client mode, check if a WAN interface is partially functional
+            # It might not have internet, but could be connected to a local network
+            for iface in "${VALID_WAN}" "${ETH_WAN}"; do
+                if [ -n "${iface}" ] && ip link show "${iface}" >/dev/null 2>&1; then
+                    # Ensure interface is up
+                    ip link set dev "${iface}" up 2>/dev/null || true
+                    
+                    if ip link show "${iface}" | grep -q "UP" && 
+                       ip addr show dev "${iface}" | grep -q "inet " &&
+                       ! ip link show "${iface}" | grep -q "NO-CARRIER"; then
+                        
+                        # Get the default gateway for this interface if available
+                        local wan_gateway=$(ip route show | grep "default.*dev ${iface}" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -n1)
+                        
+                        if [ -n "${wan_gateway}" ]; then
+                            # Check if we already have this fallback route
+                            if ! ip route show | grep -q "default.*via ${wan_gateway}.*dev ${iface}"; then
+                                log "Adding fallback route via ${iface} gateway ${wan_gateway} (metric 300)"
+                                if ip route add default via "${wan_gateway}" dev "${iface}" metric 300; then
+                                    fallback_route_configured=true
+                                    log "Successfully added fallback route via ${wan_gateway}"
+                                else
+                                    log "Failed to add fallback route via ${wan_gateway}"
+                                fi
+                            fi
+                        fi
+                    fi
+                fi
+            done
+        fi
+        
+        # Clean up linkdown routes regardless of mode
+        for iface in "${VALID_WAN}" "${ETH_WAN}"; do
+            if [ -n "${iface}" ]; then
+                # Remove default routes through disconnected interfaces
+                ip route show | grep "default.*dev ${iface}.*linkdown" | while read -r route; do
+                    log "Cleaning up linkdown route: ${route}"
+                    ip route del default dev "${iface}" 2>/dev/null || true
+                done
+            fi
+        done
+        
+        # Clean up translation table occasionally
+        clean_translation_table 
+        
+        # Log current status every 5 intervals
+        if [ $((SECONDS % (RETRY_INTERVAL * 5))) -lt ${RETRY_INTERVAL} ]; then
+            log "Status update - Mode: ${current_mode}, WAN: ${wan_available}, Primary route: ${primary_route_configured}, Fallback: ${fallback_route_configured}"
+            
+            # Only show WAN stability counters if there's actually a WAN interface with carrier signal
+            local wan_carrier=false
+            for iface in "${VALID_WAN}" "${ETH_WAN}"; do
+                if [ -n "${iface}" ] && ip link show "${iface}" 2>/dev/null | grep -qv "NO-CARRIER"; then
+                    wan_carrier=true
+                    break
+                fi
+            done
+            
+            if [ "${wan_carrier}" = "true" ]; then
+                log "WAN stability counters - Up: ${wan_stable_count}/${wan_required_stable_count}, Down: ${wan_fail_count}/${wan_required_fail_count}"
+            fi
+            
+            ip route show | grep default | while read -r route; do
+                log "Route: ${route}"
+            done
         fi
         
         sleep "${RETRY_INTERVAL}"
     done
+}
+
+# Add helper functions for mesh route management
+setup_mesh_primary_route() {
+    log "Setting up primary route via mesh network..."
+    
+    # First try last known gateway if we have one
+    if [ -n "${last_known_mesh_gateway}" ] && [ "${last_known_mesh_gateway}" != "${NODE_IP}" ]; then
+        log "Checking last known mesh gateway: ${last_known_mesh_gateway}"
+        if ping -c 1 -W 1 "${last_known_mesh_gateway}" >/dev/null 2>&1; then
+            log "Last known mesh gateway is reachable"
+            # Only remove existing routes via bat0, preserve other routes
+            ip route del default dev bat0 2>/dev/null || true
+            
+            # Add primary route via mesh
+            if ip route add default via "${last_known_mesh_gateway}" dev bat0 metric 100; then
+                log "Successfully added primary route via ${last_known_mesh_gateway} (metric 100)"
+                primary_route_configured=true
+                current_gateway="${last_known_mesh_gateway}"
+                return 0
+            fi
+        else
+            log "Last known mesh gateway is not reachable, will search for others"
+        fi
+    fi
+    
+    # Standard gateway detection if last known gateway didn't work
+    local mesh_gateway=$(detect_gateway_ip)
+    
+    if [ -n "${mesh_gateway}" ] && [ "${mesh_gateway}" != "${NODE_IP}" ]; then
+        log "Found mesh gateway: ${mesh_gateway}"
+        
+        # Save for future use
+        last_known_mesh_gateway="${mesh_gateway}"
+        
+        # Check if we already have this route
+        if ! ip route show | grep -q "default via ${mesh_gateway} dev bat0"; then
+            # Only remove existing routes via bat0, preserve other routes
+            ip route del default dev bat0 2>/dev/null || true
+            
+            # Add primary route via mesh
+            if ip route add default via "${mesh_gateway}" dev bat0 metric 100; then
+                log "Successfully added primary route via ${mesh_gateway} (metric 100)"
+                primary_route_configured=true
+                current_gateway="${mesh_gateway}"
+                return 0
+            else
+                log "Failed to add primary route via mesh"
+                return 1
+            fi
+        else
+            # Route already exists, just mark it as configured
+            log "Route to ${mesh_gateway} already exists"
+            primary_route_configured=true
+            current_gateway="${mesh_gateway}"
+            return 0
+        fi
+    else
+        log "No suitable mesh gateway found, will retry"
+        return 1
+    fi
+}
+
+setup_mesh_fallback_route() {
+    log "Attempting to configure fallback route via mesh network..."
+    
+    local fallback_gateway=""
+    
+    # First try to use the last known good mesh gateway if available
+    if [ -n "${last_known_mesh_gateway}" ] && [ "${last_known_mesh_gateway}" != "${NODE_IP}" ]; then
+        log "Checking if last known mesh gateway ${last_known_mesh_gateway} is still available"
+        if ping -c 1 -W 1 "${last_known_mesh_gateway}" >/dev/null 2>&1; then
+            fallback_gateway="${last_known_mesh_gateway}"
+            log "Last known mesh gateway ${fallback_gateway} is reachable"
+        else
+            log "Last known mesh gateway ${last_known_mesh_gateway} is not reachable, will search for others"
+        fi
+    fi
+    
+    # If no last known gateway, try to find one
+    if [ -z "${fallback_gateway}" ]; then
+        fallback_gateway=$(detect_gateway_ip)
+    fi
+    
+    # If we found a fallback gateway, configure the route
+    if [ -n "${fallback_gateway}" ] && [ "${fallback_gateway}" != "${NODE_IP}" ]; then
+        log "Found potential fallback gateway: ${fallback_gateway}"
+        
+        # Add fallback route with higher metric (lower priority)
+        if ip route add default via "${fallback_gateway}" dev bat0 metric 200; then
+            log "Successfully added fallback route via ${fallback_gateway} (metric 200)"
+            fallback_route_configured=true
+            # Also save this as our last known good gateway
+            last_known_mesh_gateway="${fallback_gateway}"
+            return 0
+        else
+            log "Failed to add fallback route"
+            return 1
+        fi
+    else
+        log "No suitable fallback gateway found, will retry later"
+        return 1
+    fi
 }
 
 # Function for cleanup on exit
@@ -1409,11 +2135,16 @@ setup_logging "$1"
 # Run main script
 log "==== MESH NETWORK SETUP ===="
 setup_mesh_network
-
 log "==== MESH NETWORK SETUP COMPLETE ===="
 
 # If running as a service, start monitoring
 if [ "${1}" = "service" ]; then
     log "==== STARTING MONITORING SERVICE ===="
-    monitor_mesh_network
+    # Pass the original command line args to the monitor function
+    if [ "${BATMAN_GW_MODE}" = "auto" ]; then
+        log "Starting monitor with auto mode enabled"
+        monitor_mesh_network "auto"
+    else
+        monitor_mesh_network "${BATMAN_GW_MODE}"
+    fi
 fi
