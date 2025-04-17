@@ -86,6 +86,10 @@ setup_logging() {
 }
 
 # Log levels: 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR
+# DEBUG: Detailed information useful for troubleshooting
+# INFO: Normal operational messages and milestones
+# WARN: Warning conditions that don't interrupt operation but should be noted
+# ERROR: Error conditions that affect functionality
 LOG_LEVEL=1
 
 log_debug() {
@@ -506,7 +510,12 @@ evaluate_wan_status() {
         local new_fail_count=0
         local new_stable_count=$((stable_count + 1))
         
-        if [ $new_stable_count -ge $stable_threshold ] && [ "$current_status" = "false" ]; then
+        # Cap the stable counter at exactly the required threshold for display purposes
+        if [ ${new_stable_count} -gt ${stable_threshold} ]; then
+            new_stable_count=${stable_threshold}
+        fi
+        
+        if [ ${new_stable_count} -ge ${stable_threshold} ] && [ "$current_status" = "false" ]; then
             # WAN has been stable for required number of checks, change status
             log_info "WAN connection detected and stabilized (previously unavailable)"
             local new_status="true"
@@ -558,7 +567,7 @@ check_wan_connectivity() {
     if ! is_interface_up "$wan_iface"; then
         # Interface is down - has state changed?
         if [ "${WAN_INTERFACE_STATE[$wan_iface]}" != "down" ]; then
-            log_info "WAN interface $wan_iface is down or misconfigured"
+            log_warn "WAN interface $wan_iface is down or misconfigured"
             WAN_INTERFACE_STATE[$wan_iface]="down"
             WAN_INTERFACE_LAST_LOG[$wan_iface]=$current_time
         elif [ $((current_time - ${WAN_INTERFACE_LAST_LOG[$wan_iface]})) -gt 300 ]; then
@@ -580,7 +589,7 @@ check_wan_connectivity() {
         else
             # Interface up but no gateway - has state changed?
             if [ "${WAN_INTERFACE_STATE[$wan_iface]}" != "no_gateway" ]; then
-                log_info "WAN interface $wan_iface is up but has no gateway"
+                log_warn "WAN interface $wan_iface is up but has no gateway"
                 WAN_INTERFACE_STATE[$wan_iface]="no_gateway"
                 WAN_INTERFACE_LAST_LOG[$wan_iface]=$current_time
             elif [ $((current_time - ${WAN_INTERFACE_LAST_LOG[$wan_iface]})) -gt 300 ]; then
@@ -601,15 +610,12 @@ check_wan_connectivity() {
         success=$((success + 1))
     fi
     
-    # Test 2: Try multiple DNS servers (in case one is blocked)
-    for dns in 9.9.9.9 8.8.8.8 1.1.1.1 208.67.222.222; do
-        if timeout 2 ping -c 1 -W 1 ${dns} >/dev/null 2>&1; then
-            success=$((success + 1))
-            break  # One successful DNS ping is enough
-        fi
-    done
+    # Test 2: Check connection to DNS servers
+    if check_internet_connectivity; then
+        success=$((success + 1))
+    fi
     
-    # Success if either the gateway is reachable or any DNS server is reachable
+    # Success if either the gateway is reachable or internet connectivity check succeeded
     if [ $success -ge 1 ]; then
         # Interface has connectivity - has state changed?
         if [ "${WAN_INTERFACE_STATE[$wan_iface]}" != "up" ]; then
@@ -626,7 +632,7 @@ check_wan_connectivity() {
     
     # Interface up but no connectivity - has state changed?
     if [ "${WAN_INTERFACE_STATE[$wan_iface]}" != "no_internet" ]; then
-        log_info "WAN interface $wan_iface is up but has no internet connectivity"
+        log_warn "WAN interface $wan_iface is up but has no internet connectivity"
         WAN_INTERFACE_STATE[$wan_iface]="no_internet"
         WAN_INTERFACE_LAST_LOG[$wan_iface]=$current_time
     elif [ $((current_time - ${WAN_INTERFACE_LAST_LOG[$wan_iface]})) -gt 300 ]; then
@@ -754,7 +760,7 @@ validate_config() {
     
     # Set auto mode always - no user configuration needed
     BATMAN_GW_MODE="auto"
-    log "Using auto mode: server when WAN is available, client when unavailable"
+    log_info "Using auto mode: server when WAN is available, client when unavailable"
 }
 
 # Function to get gateway MACs from batctl gwl
@@ -876,7 +882,7 @@ detect_gateway_ip() {
     for gateway_mac in ${gateway_macs}; do
         # Skip if this is our own MAC
         if [ "${gateway_mac}" = "${our_virtual_mac}" ]; then
-            log "Skipping our own MAC: ${gateway_mac}" >&2
+            log_debug "Skipping our own MAC: ${gateway_mac}" >&2
             continue
         fi
         
@@ -889,15 +895,15 @@ detect_gateway_ip() {
             [ "${ip}" = "${NODE_IP}" ] && continue
             
             if [ "${bat0_mac}" = "${gateway_mac}" ]; then
-                log "Found gateway in translation table: ${ip} (MAC: ${bat0_mac})" >&2
+                log_debug "Found gateway in translation table: ${ip} (MAC: ${bat0_mac})" >&2
                 
                 # Verify gateway is still available
                 if is_gateway_available "${bat0_mac}"; then
-                    log "Gateway ${ip} is available" >&2
+                    log_debug "Gateway ${ip} is available" >&2
                     echo "${ip}"
                     return 0
                 else
-                    log "Gateway ${ip} from translation table is no longer available" >&2
+                    log_debug "Gateway ${ip} from translation table is no longer available" >&2
                     # Add to known gateways for fallback
                     known_gateways="${known_gateways} ${ip}"
                 fi
@@ -905,27 +911,27 @@ detect_gateway_ip() {
         done < "${TRANSLATION_TABLE_FILE}"
     done
     
-    log "No valid gateway found in translation table, performing network scan" >&2
+    log_debug "No valid gateway found in translation table, performing network scan" >&2
     
     # Use cached scan results if available
     local mesh_nodes=""
     if [ -n "${MESH_SCAN_CACHE}" ]; then
-        log "Using cached scan results" >&2
+        log_debug "Using cached scan results" >&2
         mesh_nodes="${MESH_SCAN_CACHE}"
-        log "Cached mesh nodes: ${mesh_nodes}" >&2
+        log_debug "Cached mesh nodes: ${mesh_nodes}" >&2
     else
         # Calculate network address from NODE_IP and MESH_NETMASK
         local network_addr="${NODE_IP%.*}.0"
         
         # Scan the network using arp-scan
-        log "Scanning network with arp-scan..." >&2
+        log_debug "Scanning network with arp-scan..." >&2
         if ! command -v arp-scan >/dev/null 2>&1; then
-            log "ERROR: arp-scan is not installed" >&2
+            log_error "ERROR: arp-scan is not installed" >&2
             return 1
         fi
         
         # First try a quick scan of likely addresses (first 20 IPs)
-        log "Performing quick scan of likely IPs first" >&2
+        log_debug "Performing quick scan of likely IPs first" >&2
         local quick_scan_output
         quick_scan_output=$(sudo arp-scan --interface=bat0 --retry=1 --timeout=500 "${network_addr%.*}.1-20" 2>/dev/null)
         
@@ -934,19 +940,19 @@ detect_gateway_ip() {
         quick_mesh_nodes=$(echo "${quick_scan_output}" | grep -v "Interface:" | grep -v "Starting" | grep -v "packets" | grep -v "Ending" | grep -v "WARNING")
         
         if [ -n "${quick_mesh_nodes}" ]; then
-            log "Quick scan found nodes: ${quick_mesh_nodes}" >&2
+            log_debug "Quick scan found nodes: ${quick_mesh_nodes}" >&2
             mesh_nodes="${quick_mesh_nodes}"
         else
-            log "No nodes found in quick scan, performing full scan" >&2
+            log_debug "No nodes found in quick scan, performing full scan" >&2
             local scan_output
             scan_output=$(sudo arp-scan --interface=bat0 --retry=1 "${network_addr}/${MESH_NETMASK}" 2>/dev/null)
             
             if [ $? -ne 0 ]; then
-                log "arp-scan failed" >&2
+                log_error "arp-scan failed" >&2
                 return 1
             fi
             
-            log "arp-scan output: ${scan_output}" >&2
+            log_debug "arp-scan output: ${scan_output}" >&2
             
             # Extract IPs and MACs from scan output, skipping header and footer lines
             mesh_nodes=$(echo "${scan_output}" | grep -v "Interface:" | grep -v "Starting" | grep -v "packets" | grep -v "Ending" | grep -v "WARNING")
@@ -954,14 +960,14 @@ detect_gateway_ip() {
     fi
     
     if [ -z "${mesh_nodes}" ]; then
-        log "No nodes found by arp-scan" >&2
+        log_debug "No nodes found by arp-scan" >&2
         # Try known gateways as a last resort if we have any
         if [ -n "${known_gateways}" ]; then
-            log "Trying previously known gateways as last resort" >&2
+            log_debug "Trying previously known gateways as last resort" >&2
             for ip in ${known_gateways}; do
-                log "Checking if known gateway ${ip} is reachable" >&2
+                log_debug "Checking if known gateway ${ip} is reachable" >&2
                 if ping -c 1 -W 1 "${ip}" >/dev/null 2>&1; then
-                    log "Known gateway ${ip} is reachable, using it" >&2
+                    log_debug "Known gateway ${ip} is reachable, using it" >&2
                     echo "${ip}"
                     return 0
                 fi
@@ -970,14 +976,14 @@ detect_gateway_ip() {
         return 1
     fi
     
-    log "Found mesh nodes: ${mesh_nodes}" >&2
+    log_debug "Found mesh nodes: ${mesh_nodes}" >&2
     
     # Cache translation results to avoid redundant calls
     declare -A ip_to_mac_cache
     
     # First try to match using originator MACs directly - faster matching
     for gateway_mac in ${gateway_macs}; do
-        log "Looking for match with gateway MAC: ${gateway_mac}" >&2
+        log_debug "Looking for match with gateway MAC: ${gateway_mac}" >&2
         
         # Process each discovered node
         while read -r ip hw_mac _; do
@@ -993,7 +999,7 @@ detect_gateway_ip() {
             # Check if we already have this IP's virtual MAC cached
             if [ -n "${ip_to_mac_cache[${ip}]}" ]; then
                 virtual_mac="${ip_to_mac_cache[${ip}]}"
-                log "Using cached virtual MAC for ${ip}: ${virtual_mac}" >&2
+                log_debug "Using cached virtual MAC for ${ip}: ${virtual_mac}" >&2
             else
                 virtual_mac=$(batctl translate "${ip}" 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
                 # Cache the result
@@ -1003,22 +1009,22 @@ detect_gateway_ip() {
             fi
             
             if [ -n "${virtual_mac}" ]; then
-                log "IP ${ip} has virtual MAC: ${virtual_mac}" >&2
+                log_debug "IP ${ip} has virtual MAC: ${virtual_mac}" >&2
                 
                 # Update translation table with this mapping
                 update_translation_entry "${ip}" "${virtual_mac}" "${hw_mac}"
                 
                 # Direct comparison with gateway MAC
                 if [ "${virtual_mac}" = "${gateway_mac}" ]; then
-                    log "Found direct match! IP: ${ip}, MAC: ${virtual_mac}" >&2
+                    log_debug "Found direct match! IP: ${ip}, MAC: ${virtual_mac}" >&2
                     
                     # Verify gateway is still available
                     if is_gateway_available "${virtual_mac}"; then
-                        log "Gateway ${ip} is available" >&2
+                        log_debug "Gateway ${ip} is available" >&2
                         printf "%s\n" "${ip}"
                         return 0
                     else
-                        log "Gateway ${ip} is not available in batman-adv" >&2
+                        log_debug "Gateway ${ip} is not available in batman-adv" >&2
                     fi
                 fi
             fi
@@ -1026,7 +1032,7 @@ detect_gateway_ip() {
     done
     
     # If no direct match, look for any potential gateway
-    log "No direct match found, checking if any node can be a gateway" >&2
+    log_debug "No direct match found, checking if any node can be a gateway" >&2
     
     while read -r ip hw_mac _; do
         # Skip empty lines
@@ -1035,10 +1041,11 @@ detect_gateway_ip() {
         # Skip our own IP
         [ "${ip}" = "${NODE_IP}" ] && continue
         
-        log "Checking IP ${ip} (MAC: ${hw_mac})" >&2
+        log_debug "Checking IP ${ip} (MAC: ${hw_mac})" >&2
         
         # Get virtual MAC for this IP using batctl translate
         local virtual_mac
+        
         
         # Check if we already have this IP's virtual MAC cached
         if [ -n "${ip_to_mac_cache[${ip}]}" ]; then
@@ -1086,41 +1093,41 @@ configure_routing() {
     
     # Validate input
     if [ -z "${gateway_ip}" ] || ! [[ "${gateway_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        log "Invalid gateway IP: ${gateway_ip}"
+        log_error "Invalid gateway IP: ${gateway_ip}"
         return 1
     fi
     
     # Never use our own IP as a mesh gateway
     if [ "${gateway_ip}" = "${NODE_IP}" ]; then
-        log "WARNING: Attempted to use our own IP (${NODE_IP}) as gateway. This is not allowed."
+        log_warn "Attempted to use our own IP (${NODE_IP}) as gateway. This is not allowed."
         return 1
     fi
     
-    log "Configuring routing for gateway ${gateway_ip} with metric ${metric}"
+    log_info "Configuring routing for gateway ${gateway_ip} with metric ${metric}"
     
     # For server mode, we set up routing through WAN
     if [ "${BATMAN_GW_MODE}" = "server" ] && [ -n "${active_wan}" ]; then
-        log "Server mode: Setting up routing through ${active_wan}"
+        log_info "Server mode: Setting up routing through ${active_wan}"
         
         # Get the default gateway for the WAN interface
         local wan_gateway=$(ip route show | grep "default.*dev ${active_wan}" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -n1)
         
         if [ -z "${wan_gateway}" ]; then
-            log "Warning: No default gateway found for ${active_wan}"
+            log_warn "No default gateway found for ${active_wan}"
             # Try to get the gateway from the subnet
             local wan_ip=$(ip -4 addr show dev "${active_wan}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
             if [ -n "${wan_ip}" ]; then
                 local wan_subnet=$(echo "${wan_ip}" | cut -d. -f1-3)
                 wan_gateway="${wan_subnet}.1"
-                log "Using assumed gateway ${wan_gateway} for ${active_wan}"
+                log_info "Using assumed gateway ${wan_gateway} for ${active_wan}"
             
                 # Try to add a default route if none exists
                 if ! ip route show | grep -q "default.*${active_wan}"; then
-                    log "Adding default route via ${wan_gateway} dev ${active_wan}"
+                    log_info "Adding default route via ${wan_gateway} dev ${active_wan}"
                     ip route add default via "${wan_gateway}" dev "${active_wan}" metric 50
                 fi
             else
-                log "Error: Could not determine a gateway for ${active_wan}"
+                log_error "Could not determine a gateway for ${active_wan}"
                 return 1
             fi
         fi
@@ -1144,30 +1151,30 @@ configure_routing() {
                 if [ -n "${lan_ip}" ]; then
                     # Add NAT for LAN traffic
                     iptables -t nat -A POSTROUTING -s "$(echo "${lan_ip}" | cut -d. -f1-3).0/24" -o "${active_wan}" -j MASQUERADE
-                    log "Enabled NAT for ${lan_iface} subnet $(echo "${lan_ip}" | cut -d. -f1-3).0/24"
+                    log_debug "Enabled NAT for ${lan_iface} subnet $(echo "${lan_ip}" | cut -d. -f1-3).0/24"
                 fi
             fi
         done
         
-        log "Server mode routing through ${active_wan} via ${wan_gateway} configured"
+        log_info "Server mode routing through ${active_wan} via ${wan_gateway} configured"
         return 0
     fi
     
     # For client mode or adding a specific route
-    log "Setting up route via ${gateway_ip} with metric ${metric}"
+    log_info "Setting up route via ${gateway_ip} with metric ${metric}"
     
     # Check if the route already exists
     if ip route show | grep -q "default via ${gateway_ip} dev bat0 metric ${metric}"; then
-        log "Route already exists, skipping"
+        log_debug "Route already exists, skipping"
         return 0
     fi
     
     # Add the route with the specified metric
     if ip route add default via "${gateway_ip}" dev bat0 metric "${metric}"; then
-        log "Successfully added route via ${gateway_ip} with metric ${metric}"
+        log_info "Successfully added route via ${gateway_ip} with metric ${metric}"
         return 0
     else
-        log "Failed to add route via ${gateway_ip}"
+        log_error "Failed to add route via ${gateway_ip}"
         return 1
     fi
 }
@@ -1177,38 +1184,38 @@ VALID_WAN=""
 VALID_AP=""
 VALID_ETH_LAN=""
 get_valid_interfaces() {
-    log "Validating network interfaces..."
+    log_info "Validating network interfaces..."
     
     # Check WAN interfaces with more detailed validation
     if ip link show "${WAN_IFACE}" >/dev/null 2>&1 && [ -n "${WAN_IFACE}" ]; then
         VALID_WAN="${WAN_IFACE}"
-        log "Found WAN interface: ${VALID_WAN}"
+        log_info "Found WAN interface: ${VALID_WAN}"
     elif ip link show "${ETH_WAN}" >/dev/null 2>&1 && [ -n "${ETH_WAN}" ]; then
         VALID_WAN="${ETH_WAN}"
-        log "Found WAN interface: ${VALID_WAN}"
+        log_info "Found WAN interface: ${VALID_WAN}"
     else
-        log "WARNING: No valid WAN interface found"
+        log_warn "No valid WAN interface found"
     fi
     
     # Check AP interface
     if ip link show "${WAP_IFACE}" >/dev/null 2>&1 && [ -n "${WAP_IFACE}" ]; then
         VALID_AP="${WAP_IFACE}"
-        log "Found AP interface: ${VALID_AP}"
+        log_info "Found AP interface: ${VALID_AP}"
     else
-        log "INFO: No AP interface found"
+        log_debug "No AP interface found"
     fi
     
     # Check Ethernet LAN interface
     if ip link show "${ETH_LAN}" >/dev/null 2>&1 && [ -n "${ETH_LAN}" ]; then
         VALID_ETH_LAN="${ETH_LAN}"  
-        log "Found Ethernet LAN interface: ${VALID_ETH_LAN}"
+        log_info "Found Ethernet LAN interface: ${VALID_ETH_LAN}"
     else
-        log "INFO: No Ethernet LAN interface found"
+        log_debug "No Ethernet LAN interface found"
     fi
     
     # Log if no LAN interfaces found
     if [ -z "${VALID_AP}" ] && [ -z "${VALID_ETH_LAN}" ]; then
-        log "WARNING: No valid LAN interfaces found"
+        log_warn "No valid LAN interfaces found"
     fi
 }
 
@@ -1534,21 +1541,21 @@ EOF
 
 # Function to set up firewall rules
 setup_firewall() {
-    log "Setting up firewall rules..."
+    log_info "Setting up firewall rules..."
     
     # Clean up existing firewall rules, but don't touch routes
-    iptables -F || { log "Error: Failed to flush iptables rules"; return 1; }
-    iptables -t nat -F || { log "Error: Failed to flush NAT rules"; return 1; }
-    iptables -t mangle -F || { log "Error: Failed to flush mangle rules"; return 1; }
+    iptables -F || { log_error "Failed to flush iptables rules"; return 1; }
+    iptables -t nat -F || { log_error "Failed to flush NAT rules"; return 1; }
+    iptables -t mangle -F || { log_error "Failed to flush mangle rules"; return 1; }
     
-    log "Setting default policies"
-    iptables -P INPUT ACCEPT || { log "Error: Failed to set INPUT policy"; return 1; }
-    iptables -P FORWARD ACCEPT || { log "Error: Failed to set FORWARD policy"; return 1; }
-    iptables -P OUTPUT ACCEPT || { log "Error: Failed to set OUTPUT policy"; return 1; }
+    log_debug "Setting default policies"
+    iptables -P INPUT ACCEPT || { log_error "Failed to set INPUT policy"; return 1; }
+    iptables -P FORWARD ACCEPT || { log_error "Failed to set FORWARD policy"; return 1; }
+    iptables -P OUTPUT ACCEPT || { log_error "Failed to set OUTPUT policy"; return 1; }
     
     # Configure NAT and routing for server mode
     if [ "${BATMAN_GW_MODE}" = "server" ] && [ -n "${VALID_WAN}" ]; then
-        log "Setting up NAT and routing for server mode"
+        log_info "Setting up NAT and routing for server mode"
         
         # Allow established connections
         iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -1571,7 +1578,7 @@ setup_firewall() {
         # Set up rules for both LAN interfaces using a common pattern
         for lan_iface in "${VALID_AP}" "${VALID_ETH_LAN}"; do
             if [ -n "${lan_iface}" ]; then
-                log "Setting up forwarding for interface: ${lan_iface}"
+                log_debug "Setting up forwarding for interface: ${lan_iface}"
                 # Allow forwarding between LAN interface and mesh/WAN
                 iptables -A FORWARD -i "${lan_iface}" -j ACCEPT
                 iptables -A FORWARD -o "${lan_iface}" -j ACCEPT
@@ -1582,7 +1589,7 @@ setup_firewall() {
         done
     else
         # Client mode or no WAN interface
-        log "Setting up client mode routing and forwarding"
+        log_info "Setting up client mode routing and forwarding"
         iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
         iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
         
@@ -1593,7 +1600,7 @@ setup_firewall() {
         # Set up rules for both LAN interfaces using a common pattern
         for lan_iface in "${VALID_AP}" "${VALID_ETH_LAN}"; do
             if [ -n "${lan_iface}" ]; then
-                log "Setting up forwarding for interface: ${lan_iface}"
+                log_debug "Setting up forwarding for interface: ${lan_iface}"
                 # Allow forwarding between LAN and mesh
                 iptables -A FORWARD -i "${lan_iface}" -j ACCEPT
                 iptables -A FORWARD -o "${lan_iface}" -j ACCEPT
@@ -1608,18 +1615,18 @@ setup_firewall() {
                 
                 # NAT all traffic from LAN to mesh
                 if [ -n "${subnet}" ]; then
-                    log "Setting up NAT for subnet ${subnet} from ${lan_iface} to bat0"
+                    log_debug "Setting up NAT for subnet ${subnet} from ${lan_iface} to bat0"
                     iptables -t nat -A POSTROUTING -o bat0 ${subnet} -j MASQUERADE
                 else
                     # Fallback if no subnet info available
-                    log "Setting up NAT for all traffic from ${lan_iface} to bat0"
+                    log_debug "Setting up NAT for all traffic from ${lan_iface} to bat0"
                     iptables -t nat -A POSTROUTING -o bat0 -j MASQUERADE
                 fi
             fi
         done
     fi
     
-    log "Setting up logging rules"
+    log_debug "Setting up logging rules"
     # Security logging
     iptables -A INPUT -m limit --limit 5/min -j LOG --log-prefix "iptables_INPUT_denied: " --log-level 7
     iptables -A FORWARD -m limit --limit 5/min -j LOG --log-prefix "iptables_FORWARD_denied: " --log-level 7
@@ -1629,23 +1636,23 @@ setup_firewall() {
 
 # Function to configure batman-adv parameters
 setup_batman_params() {
-    log "Setting BATMAN-adv parameters"
+    log_info "Setting BATMAN-adv parameters"
     
     # If BATMAN_GW_MODE is auto, don't set it here - it will be handled by the dynamic routing
     if [ "${BATMAN_GW_MODE}" != "auto" ]; then
-    if ! batctl gw_mode "${BATMAN_GW_MODE}"; then
-        log "Error: Failed to set gateway mode"
-        return 1
+        if ! batctl gw_mode "${BATMAN_GW_MODE}"; then
+            log_error "Failed to set gateway mode"
+            return 1
         fi
     fi
 
     if ! batctl orig_interval "${BATMAN_ORIG_INTERVAL}"; then
-        log "Error: Failed to set originator interval"
+        log_error "Failed to set originator interval"
         return 1
     fi
 
     if ! batctl hop_penalty "${BATMAN_HOP_PENALTY}"; then
-        log "Error: Failed to set hop penalty"
+        log_error "Failed to set hop penalty"
         return 1
     fi
     
@@ -1654,49 +1661,49 @@ setup_batman_params() {
 
 # Setup wireless interface for mesh
 setup_wireless_interface() {
-    log "Setting up wireless interface ${MESH_IFACE}"
+    log_info "Setting up wireless interface ${MESH_IFACE}"
     
-    log "Disabling NetworkManager for ${MESH_IFACE}"
+    log_debug "Disabling NetworkManager for ${MESH_IFACE}"
     nmcli device set "${MESH_IFACE}" managed no
     sleep 0.5
 
-    log "Setting interface down"
+    log_debug "Setting interface down"
     ip link set down dev "${MESH_IFACE}"
     sleep 0.5
 
-    log "Loading batman-adv module"
+    log_info "Loading batman-adv module"
     modprobe batman-adv
     if ! lsmod | grep -q "^batman_adv"; then
-        log "Error: Failed to load batman-adv module"
+        log_error "Error: Failed to load batman-adv module"
         return 1
     fi
     sleep 1
 
-    log "Setting routing algorithm to ${BATMAN_ROUTING_ALGORITHM}"
+    log_info "Setting routing algorithm to ${BATMAN_ROUTING_ALGORITHM}"
     if ! batctl ra "${BATMAN_ROUTING_ALGORITHM}"; then
-        log "Error: Failed to set routing algorithm to ${BATMAN_ROUTING_ALGORITHM}"
+        log_error "Error: Failed to set routing algorithm to ${BATMAN_ROUTING_ALGORITHM}"
         return 1
     fi
     sleep 0.5
 
-    log "Setting MTU"
+    log_debug "Setting MTU"
     ip link set mtu "${MESH_MTU}" dev "${MESH_IFACE}"
     sleep 0.5
 
-    log "Configuring wireless settings"
+    log_info "Configuring wireless settings"
     iwconfig "${MESH_IFACE}" mode ad-hoc
     iwconfig "${MESH_IFACE}" essid "${MESH_ESSID}"
     iwconfig "${MESH_IFACE}" ap "${MESH_CELL_ID}"
     iwconfig "${MESH_IFACE}" channel "${MESH_CHANNEL}"
     sleep 0.5
 
-    log "Setting interface up"
+    log_debug "Setting interface up"
     ip link set up dev "${MESH_IFACE}"
     sleep 1
 
-    log "Verifying interface is up"
+    log_debug "Verifying interface is up"
     if ! ip link show "${MESH_IFACE}" | grep -q "UP"; then
-        log "Error: Failed to bring up ${MESH_IFACE}"
+        log_error "Error: Failed to bring up ${MESH_IFACE}"
         return 1
     fi
     
@@ -1778,7 +1785,7 @@ setup_initial_routing() {
         switch_to_mode "server" "${active_wan}"
         
         # Try to find external mesh gateways for fallback
-        log_info "Attempting to configure fallback route via mesh network..."
+        log_debug "Attempting to configure fallback route via mesh network..."
         local fallback_gateway=""
         
         # Wait for mesh to stabilize briefly
@@ -1800,7 +1807,7 @@ setup_initial_routing() {
             # Add fallback route with higher metric (lower priority)
             add_route "${fallback_gateway}" "bat0" "200"
         else
-            log_info "No suitable external fallback gateway found, will be managed by monitoring service"
+            log_debug "No suitable external fallback gateway found, will be managed by monitoring service"
         fi
     else
         # No WAN available
@@ -1812,8 +1819,8 @@ setup_initial_routing() {
     fi
     
     # Display routing table for debugging
-    log_info "Initial routing table configuration:"
-    ip route | grep default || log_info "No default routes configured"
+    log_debug "Initial routing table configuration:"
+    ip route | grep default || log_debug "No default routes configured"
 }
 
 # Initial routing for client mode
@@ -1913,18 +1920,18 @@ setup_initial_client_routing() {
 
 # Check requirements for mesh network
 check_requirements() {
-    log "Checking required tools..."
+    log_info "Checking required tools..."
     
     # Verify required tools
-    command -v batctl >/dev/null 2>&1 || { log "Error: batctl not installed"; return 1; }
-    command -v ip >/dev/null 2>&1 || { log "Error: ip command not found"; return 1; }
-    command -v iwconfig >/dev/null 2>&1 || { log "Error: iwconfig not found"; return 1; }
-    command -v iptables >/dev/null 2>&1 || { log "Error: iptables not found"; return 1; }
-    command -v nmcli >/dev/null 2>&1 || { log "Error: nmcli not found"; return 1; }
+    command -v batctl >/dev/null 2>&1 || { log_error "Error: batctl not installed"; return 1; }
+    command -v ip >/dev/null 2>&1 || { log_error "Error: ip command not found"; return 1; }
+    command -v iwconfig >/dev/null 2>&1 || { log_error "Error: iwconfig not found"; return 1; }
+    command -v iptables >/dev/null 2>&1 || { log_error "Error: iptables not found"; return 1; }
+    command -v nmcli >/dev/null 2>&1 || { log_error "Error: nmcli not found"; return 1; }
 
     # Verify interface exists and is wireless
-    ip link show "${MESH_IFACE}" >/dev/null 2>&1 || { log "Error: ${MESH_IFACE} interface not found"; return 1; }
-    iwconfig "${MESH_IFACE}" 2>/dev/null | grep -q "IEEE 802.11" || { log "Error: ${MESH_IFACE} is not a wireless interface"; return 1; }
+    ip link show "${MESH_IFACE}" >/dev/null 2>&1 || { log_error "Error: ${MESH_IFACE} interface not found"; return 1; }
+    iwconfig "${MESH_IFACE}" 2>/dev/null | grep -q "IEEE 802.11" || { log_error "Error: ${MESH_IFACE} is not a wireless interface"; return 1; }
     
     return 0
 }
@@ -1951,7 +1958,7 @@ check_wan_connectivity() {
     if ! is_interface_up "$wan_iface"; then
         # Interface is down - has state changed?
         if [ "${WAN_INTERFACE_STATE[$wan_iface]}" != "down" ]; then
-            log_info "WAN interface $wan_iface is down or misconfigured"
+            log_warn "WAN interface $wan_iface is down or misconfigured"
             WAN_INTERFACE_STATE[$wan_iface]="down"
             WAN_INTERFACE_LAST_LOG[$wan_iface]=$current_time
         elif [ $((current_time - ${WAN_INTERFACE_LAST_LOG[$wan_iface]})) -gt 300 ]; then
@@ -1973,7 +1980,7 @@ check_wan_connectivity() {
         else
             # Interface up but no gateway - has state changed?
             if [ "${WAN_INTERFACE_STATE[$wan_iface]}" != "no_gateway" ]; then
-                log_info "WAN interface $wan_iface is up but has no gateway"
+                log_warn "WAN interface $wan_iface is up but has no gateway"
                 WAN_INTERFACE_STATE[$wan_iface]="no_gateway"
                 WAN_INTERFACE_LAST_LOG[$wan_iface]=$current_time
             elif [ $((current_time - ${WAN_INTERFACE_LAST_LOG[$wan_iface]})) -gt 300 ]; then
@@ -1994,15 +2001,12 @@ check_wan_connectivity() {
         success=$((success + 1))
     fi
     
-    # Test 2: Try multiple DNS servers (in case one is blocked)
-    for dns in 9.9.9.9 8.8.8.8 1.1.1.1 208.67.222.222; do
-        if timeout 2 ping -c 1 -W 1 ${dns} >/dev/null 2>&1; then
-            success=$((success + 1))
-            break  # One successful DNS ping is enough
-        fi
-    done
+    # Test 2: Check connection to DNS servers
+    if check_internet_connectivity; then
+        success=$((success + 1))
+    fi
     
-    # Success if either the gateway is reachable or any DNS server is reachable
+    # Success if either the gateway is reachable or internet connectivity check succeeded
     if [ $success -ge 1 ]; then
         # Interface has connectivity - has state changed?
         if [ "${WAN_INTERFACE_STATE[$wan_iface]}" != "up" ]; then
@@ -2019,7 +2023,7 @@ check_wan_connectivity() {
     
     # Interface up but no connectivity - has state changed?
     if [ "${WAN_INTERFACE_STATE[$wan_iface]}" != "no_internet" ]; then
-        log_info "WAN interface $wan_iface is up but has no internet connectivity"
+        log_warn "WAN interface $wan_iface is up but has no internet connectivity"
         WAN_INTERFACE_STATE[$wan_iface]="no_internet"
         WAN_INTERFACE_LAST_LOG[$wan_iface]=$current_time
     elif [ $((current_time - ${WAN_INTERFACE_LAST_LOG[$wan_iface]})) -gt 300 ]; then
@@ -2033,6 +2037,9 @@ check_wan_connectivity() {
 # Monitor mesh network for changes in gateway mode and fallback routes, runs continuously
 monitor_mesh_network() {
     local RETRY_INTERVAL=5  # Time between retries in seconds
+    
+    # Set up status directory for real-time status updates
+    setup_status_directory
     
     # Detect current batman-adv gateway mode instead of assuming client mode
     local current_mode
@@ -2059,20 +2066,20 @@ monitor_mesh_network() {
         if ip route show | grep -q "default via .* dev ${VALID_WAN} metric 50" || 
            ip route show | grep -q "default via .* dev ${ETH_WAN} metric 50"; then
             primary_route_configured=true
-            log_info "Found existing primary route via WAN (server mode)"
+            log_debug "Found existing primary route via WAN (server mode)"
         fi
     else
         # In client mode, the primary route is via bat0 with metric 100
         if ip route show | grep -q "default via .* dev bat0 metric 100"; then
             primary_route_configured=true
             current_gateway=$(ip route show | grep "default via .* dev bat0 metric 100" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}')
-            log_info "Found existing primary route via ${current_gateway} (client mode)"
+            log_debug "Found existing primary route via ${current_gateway} (client mode)"
             
             # Skip checking if route is via our own IP, we will rely on detect_gateway_ip 
             # to find appropriate mesh gateways
             if [ -n "${current_gateway}" ] && [ "${current_gateway}" != "${NODE_IP}" ]; then
                 last_known_mesh_gateway="${current_gateway}"
-                log_info "Saving ${last_known_mesh_gateway} as last known mesh gateway"
+                log_debug "Saving ${last_known_mesh_gateway} as last known mesh gateway"
             fi
         fi
     fi
@@ -2083,7 +2090,7 @@ monitor_mesh_network() {
         local fallback=$(ip route show | grep "default via .* dev bat0 metric 200" | grep -oE 'via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}')
         if [ -n "${fallback}" ] && [ "${fallback}" != "${NODE_IP}" ] && [ -z "${last_known_mesh_gateway}" ]; then
             last_known_mesh_gateway="${fallback}"
-            log_info "Found fallback route via ${fallback}, saving as potential gateway"
+            log_debug "Found fallback route via ${fallback}, saving as potential gateway"
         fi
     fi
     
@@ -2096,7 +2103,14 @@ monitor_mesh_network() {
     
     log_info "Starting mesh network monitoring with dynamic routing..."
     log_info "Initial mode: ${current_mode} (dynamic mode switching always enabled)"
-    log_info "Current routes: Primary route configured: ${primary_route_configured}, Fallback route configured: ${fallback_route_configured}"
+    log_debug "Current routes: Primary route configured: ${primary_route_configured}, Fallback route configured: ${fallback_route_configured}"
+    
+    # Initial status file update
+    local initial_internet_available=false
+    if check_internet_connectivity; then
+        initial_internet_available=true
+    fi
+    update_route_status "${current_mode}" "${wan_available}" "${primary_route_configured}" "${fallback_route_configured}" "${active_wan}" "${wan_stable_count}" "${wan_required_stable_count}" "${wan_fail_count}" "${wan_required_fail_count}" "${initial_internet_available}"
     
     while true; do
         # Check if bat0 interface is up
@@ -2104,6 +2118,12 @@ monitor_mesh_network() {
             log_error "bat0 interface not ready or down, waiting..."
             sleep "${RETRY_INTERVAL}"
             continue
+        fi
+        
+        # Check connection to DNS servers
+        local internet_available=false
+        if check_internet_connectivity; then
+            internet_available=true
         fi
         
         # Check WAN connectivity on all possible interfaces
@@ -2135,6 +2155,11 @@ monitor_mesh_network() {
             # WAN is currently available
             wan_fail_count=0  # Reset failure counter
             wan_stable_count=$((wan_stable_count + 1))
+            
+            # Cap the stable counter at exactly the required threshold for display purposes
+            if [ ${wan_stable_count} -gt ${wan_required_stable_count} ]; then
+                wan_stable_count=${wan_required_stable_count}
+            fi
             
             if [ ${wan_stable_count} -ge ${wan_required_stable_count} ] && [ "${wan_available}" = "false" ]; then
                 # WAN has been stable for required number of checks, change status
@@ -2196,14 +2221,14 @@ monitor_mesh_network() {
             # Save the current bat0 gateway before switching
             if [ -n "${current_gateway}" ] && [ "${current_gateway}" != "${NODE_IP}" ]; then
                 last_known_mesh_gateway="${current_gateway}"
-                log_info "Saved mesh gateway ${last_known_mesh_gateway} before switching to server mode"
+                log_debug "Saved mesh gateway ${last_known_mesh_gateway} before switching to server mode"
             fi
             
             # Use the unified mode switching function
             switch_to_mode "server" "${active_wan}"
             
             # Setting up fallback route via mesh network
-            log_info "Setting up fallback route via mesh network"
+            log_debug "Setting up fallback route via mesh network"
             setup_mesh_fallback_route
         
         elif [ "${wan_available}" = "false" ] && [ "${current_mode}" != "client" ]; then
@@ -2229,6 +2254,12 @@ monitor_mesh_network() {
             
             # Set up primary route via mesh
             setup_mesh_primary_route
+            
+            # Update internet connectivity status
+            internet_available=$(check_internet_connectivity && echo true || echo false)
+            if [ "${internet_available}" = "true" ]; then
+                log_info "Internet connectivity verified through mesh network"
+            fi
         fi
 
         # Manage routes based on current mode
@@ -2236,7 +2267,7 @@ monitor_mesh_network() {
             # In server mode, verify NAT and forwarding are working
             if [ "${wan_available}" = "true" ]; then
                 if ! iptables -t nat -L POSTROUTING -v 2>/dev/null | grep -q "${active_wan}"; then
-                    log "NAT rules missing or outdated, reconfiguring..."
+                    log_warn "NAT rules missing or outdated, reconfiguring..."
                     
                     # Flush existing NAT rules and set up new ones
                     iptables -t nat -F POSTROUTING
@@ -2256,7 +2287,7 @@ monitor_mesh_network() {
                 fi
             else
                 # Server mode but WAN is down - force transition to client mode immediately
-                log "In server mode but WAN is down - forcing transition to client mode"
+                log_warn "In server mode but WAN is down - forcing transition to client mode"
                 batctl gw_mode client
                 current_mode="client"
                 
@@ -2276,6 +2307,12 @@ monitor_mesh_network() {
                 # Set up proper mesh routing
                 setup_mesh_primary_route
                 
+                # Update internet connectivity status
+                internet_available=$(check_internet_connectivity && echo true || echo false)
+                if [ "${internet_available}" = "true" ]; then
+                    log_info "Internet connectivity verified through mesh network"
+                fi
+                
                 # Will continue to next loop iteration with new settings
                 continue
             fi
@@ -2287,7 +2324,7 @@ monitor_mesh_network() {
                 # Check if fallback gateway is still valid
                     unreachable=$(monitor_gateway "${current_gateway}")
                     if [ "${unreachable}" = "true" ]; then
-                    log "Fallback gateway ${current_gateway} is unreachable, removing route"
+                    log_warn "Fallback gateway ${current_gateway} is unreachable, removing route"
                     ip route del default via "${current_gateway}" dev bat0 metric 200 2>/dev/null || true
                     fallback_route_configured=false
                     current_gateway=""
@@ -2303,23 +2340,42 @@ monitor_mesh_network() {
             # Check if we have a primary route via the mesh
             if [ "${primary_route_configured}" = "false" ]; then
                 setup_mesh_primary_route
+                
+                # Update internet connectivity status
+                internet_available=$(check_internet_connectivity && echo true || echo false)
+                if [ "${internet_available}" = "true" ]; then
+                    log_info "Internet connectivity verified through mesh network"
+                fi
             elif [ -n "${current_gateway}" ]; then
                 # Verify the route still exists (in case it was removed externally)
                 if ! ip route show | grep -q "default via ${current_gateway} dev bat0"; then
-                    log "Primary route via ${current_gateway} is missing, will reconfigure"
+                    log_warn "Primary route via ${current_gateway} is missing, will reconfigure"
                     primary_route_configured=false
                     setup_mesh_primary_route
+                    
+                    # Update internet connectivity status
+                    internet_available=$(check_internet_connectivity && echo true || echo false)
+                    if [ "${internet_available}" = "true" ]; then
+                        log_info "Internet connectivity verified through mesh network"
+                    fi
+                    
                     continue
                 fi
                 
                 # Check if current mesh gateway is still valid
                 unreachable=$(monitor_gateway "${current_gateway}")
                 if [ "${unreachable}" = "true" ]; then
-                    log "Current mesh gateway ${current_gateway} is unreachable, removing route"
+                    log_warn "Current mesh gateway ${current_gateway} is unreachable, removing route"
                     ip route del default via "${current_gateway}" dev bat0 2>/dev/null || true
                     primary_route_configured=false
                     current_gateway=""
                     setup_mesh_primary_route
+                    
+                    # Update internet connectivity status
+                    internet_available=$(check_internet_connectivity && echo true || echo false)
+                    if [ "${internet_available}" = "true" ]; then
+                        log_info "Internet connectivity verified through mesh network"
+                    fi
                 fi
             fi
             
@@ -2340,12 +2396,12 @@ monitor_mesh_network() {
                         if [ -n "${wan_gateway}" ]; then
                             # Check if we already have this fallback route
                             if ! ip route show | grep -q "default.*via ${wan_gateway}.*dev ${iface}"; then
-                                log "Adding fallback route via ${iface} gateway ${wan_gateway} (metric 300)"
+                                log_debug "Adding fallback route via ${iface} gateway ${wan_gateway} (metric 300)"
                                 if ip route add default via "${wan_gateway}" dev "${iface}" metric 300; then
                                     fallback_route_configured=true
-                                    log "Successfully added fallback route via ${wan_gateway}"
+                                    log_debug "Successfully added fallback route via ${wan_gateway}"
                                 else
-                                    log "Failed to add fallback route via ${wan_gateway}"
+                                    log_debug "Failed to add fallback route via ${wan_gateway}"
                                 fi
                             fi
                         fi
@@ -2400,6 +2456,9 @@ monitor_mesh_network() {
         if [ "$status_changed" = "true" ] || [ $((current_time - last_status_log)) -gt 900 ]; then
             log_info "Status update - Mode: ${current_mode}, WAN: ${wan_available}, Primary route: ${primary_route_configured}, Fallback: ${fallback_route_configured}"
             
+            # Update status file
+            update_route_status "${current_mode}" "${wan_available}" "${primary_route_configured}" "${fallback_route_configured}" "${active_wan}" "${wan_stable_count}" "${wan_required_stable_count}" "${wan_fail_count}" "${wan_required_fail_count}" "${internet_available}"
+            
             # Only show WAN stability counters if there's actually a WAN interface with carrier signal
             local wan_carrier=false
             for iface in "${VALID_WAN}" "${ETH_WAN}"; do
@@ -2410,11 +2469,11 @@ monitor_mesh_network() {
             done
             
             if [ "${wan_carrier}" = "true" ]; then
-                log_info "WAN stability counters - Up: ${wan_stable_count}/${wan_required_stable_count}, Down: ${wan_fail_count}/${wan_required_fail_count}"
+                log_debug "WAN stability counters - Up: ${wan_stable_count}/${wan_required_stable_count}, Down: ${wan_fail_count}/${wan_required_fail_count}"
             fi
             
             ip route show | grep default | while read -r route; do
-                log_info "Route: ${route}"
+                log_debug "Route: ${route}"
             done
             
             last_status_log=$current_time
@@ -2430,7 +2489,7 @@ setup_mesh_primary_route() {
     
     # First try last known gateway if we have one
     if [ -n "${last_known_mesh_gateway}" ] && [ "${last_known_mesh_gateway}" != "${NODE_IP}" ]; then
-        log_info "Checking last known mesh gateway: ${last_known_mesh_gateway}"
+        log_debug "Checking last known mesh gateway: ${last_known_mesh_gateway}"
         if ping -c 1 -W 1 "${last_known_mesh_gateway}" >/dev/null 2>&1; then
             log_info "Last known mesh gateway is reachable"
             
@@ -2540,6 +2599,163 @@ cleanup() {
 }
 
 #######################################
+# Status File Management
+#######################################
+
+# Setup status directory 
+setup_status_directory() {
+    local status_dir="/var/log/mesh-network/status"
+    
+    # Create status directory if it doesn't exist
+    mkdir -p "${status_dir}" 2>/dev/null
+    
+    # Check if directory was created
+    if [ ! -d "${status_dir}" ]; then
+        log_error "Failed to create status directory ${status_dir}. Check permissions."
+        return 1
+    fi
+    
+    # Set proper permissions - readable by all but writable only by the script
+    chmod 755 "${status_dir}" 2>/dev/null
+    
+    log_debug "Status directory setup complete: ${status_dir}"
+    return 0
+}
+
+# Function to check if internet is accessible through any interface
+check_internet_connectivity() {
+    local success=0
+    
+    # Try multiple DNS servers
+    for dns in 9.9.9.9 8.8.8.8 1.1.1.1 208.67.222.222; do
+        if timeout 2 ping -c 1 -W 1 ${dns} >/dev/null 2>&1; then
+            success=$((success + 1))
+            break  # One successful DNS ping is enough
+        fi
+    done
+    
+    # Success if any DNS server is reachable
+    if [ $success -ge 1 ]; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Update route status file with formatted information
+update_route_status() {
+    local status_dir="/var/log/mesh-network/status"
+    local routestatus_file="${status_dir}/routestatus"
+    local mode="$1"
+    local wan_available="$2" 
+    local primary_route="$3"
+    local fallback_route="$4"
+    local active_wan="$5"
+    local wan_stable_count="$6"
+    local wan_required_stable_count="$7"
+    local wan_fail_count="$8"
+    local wan_required_fail_count="$9"
+    local internet_available="${10}"
+    
+    # Create the file if it doesn't exist, or truncate it if it does
+    : > "${routestatus_file}"
+    
+    # Write a timestamp
+    echo "Last Updated: $(date '+%Y-%m-%d %H:%M:%S')" >> "${routestatus_file}"
+    echo "" >> "${routestatus_file}"
+    
+    # Use the passed internet_available parameter instead of checking again
+    local internet_status="${internet_available:-false}"
+    
+    # Overall status section
+    echo "==== MESH NETWORK STATUS ====" >> "${routestatus_file}"
+    echo "Mode: ${mode}" >> "${routestatus_file}"
+    echo "Onboard WAN Available: ${wan_available}" >> "${routestatus_file}"
+    echo "Internet Connection: ${internet_status}" >> "${routestatus_file}"
+    if [ "${wan_available}" = "true" ] && [ -n "${active_wan}" ]; then
+        echo "Active WAN Interface: ${active_wan}" >> "${routestatus_file}"
+    fi
+    echo "Primary Route Configured: ${primary_route}" >> "${routestatus_file}"
+    echo "Fallback Route Configured: ${fallback_route}" >> "${routestatus_file}"
+    echo "" >> "${routestatus_file}"
+    
+    # Routes section
+    echo "==== ACTIVE ROUTES ====" >> "${routestatus_file}"
+    ip route show | grep default | while read -r route; do
+        local route_label=""
+        
+        # Determine route type based on the interface and metric
+        if echo "${route}" | grep -q "metric 50"; then
+            route_label="[PRIMARY]"
+        elif echo "${route}" | grep -q "metric 100"; then
+            route_label="[PRIMARY MESH]"
+        elif echo "${route}" | grep -q "metric 200"; then
+            route_label="[FALLBACK]"
+        elif echo "${route}" | grep -q "metric"; then
+            route_label="[OTHER]"
+        else
+            route_label="[DEFAULT]"
+        fi
+        
+        # Format the route with its label
+        echo "${route_label} ${route}" >> "${routestatus_file}"
+    done
+    echo "" >> "${routestatus_file}"
+    
+    # Batman gateway list section
+    echo "==== BATMAN GATEWAYS ====" >> "${routestatus_file}"
+    if command -v batctl >/dev/null 2>&1; then
+        # Get raw gateway list
+        local gw_list=$(batctl gwl)
+        
+        if [ -z "${gw_list}" ] || echo "${gw_list}" | grep -q "No gateways in range"; then
+            echo "No mesh gateways available" >> "${routestatus_file}"
+        else
+            # Extract header line (contains Batman version info)
+            local header=$(echo "${gw_list}" | head -n 1)
+            echo "${header}" >> "${routestatus_file}"
+            
+            # Check if any gateways are listed
+            local gateway_count=$(echo "${gw_list}" | wc -l)
+            if [ "${gateway_count}" -le 2 ]; then
+                echo "No gateway nodes detected" >> "${routestatus_file}"
+            else
+                # Process each line after the headers (skip first 2 lines)
+                echo "${gw_list}" | tail -n +3 | while read -r line; do
+                    if [ -n "${line}" ]; then
+                        # Extract gateway information
+                        local router=$(echo "${line}" | grep -oE '\[[a-zA-Z0-9_-]+\]' | head -1 | tr -d '[]')
+                        local throughput=$(echo "${line}" | grep -oE '\([^)]+\)' | tr -d '()')
+                        local nexthop=$(echo "${line}" | grep -oE '\[[a-zA-Z0-9_-]+\]' | tail -1 | tr -d '[]')
+                        local bandwidth=$(echo "${line}" | grep -oE '[0-9]+\.[0-9]+\/[0-9]+\.[0-9]+ MBit')
+                        
+                        # Check if this is the selected gateway
+                        local selected=""
+                        if echo "${line}" | grep -q "\*"; then
+                            selected=" (SELECTED)"
+                        fi
+                        
+                        # Format the gateway information nicely
+                        echo "Gateway: ${router}${selected}" >> "${routestatus_file}"
+                        echo "  - Throughput: ${throughput}" >> "${routestatus_file}"
+                        echo "  - Next Hop: ${nexthop}" >> "${routestatus_file}"
+                        echo "  - Bandwidth: ${bandwidth}" >> "${routestatus_file}"
+                        echo "" >> "${routestatus_file}"
+                    fi
+                done
+            fi
+        fi
+    else
+        echo "batctl command not available" >> "${routestatus_file}"
+    fi
+    
+    # Set permissions - readable by all
+    chmod 644 "${routestatus_file}" 2>/dev/null
+    
+    log_debug "Route status file updated: ${routestatus_file}"
+}
+
+#######################################
 # Setup Interfaces and Services
 #######################################
 
@@ -2587,35 +2803,49 @@ setup_mesh_network() {
     
     # Log interface status
     if [ -n "${VALID_WAN}" ]; then
-        log_info "Using WAN interface: ${VALID_WAN}"
+        log_debug "Using WAN interface: ${VALID_WAN}"
     else
-        log_info "No WAN interface available"
+        log_debug "No WAN interface available"
     fi  
     
     if [ -n "${VALID_AP}" ]; then
-        log_info "Using AP interface: ${VALID_AP}"
+        log_debug "Using AP interface: ${VALID_AP}"
     else
-        log_info "No AP interface available"
+        log_debug "No AP interface available"
     fi
     
     if [ -n "${VALID_ETH_LAN}" ]; then
-        log_info "Using Ethernet LAN interface: ${VALID_ETH_LAN}"
+        log_debug "Using Ethernet LAN interface: ${VALID_ETH_LAN}"
     else
-        log_info "No Ethernet LAN interface available"
+        log_debug "No Ethernet LAN interface available"
     fi
     
     # Enable IP forwarding
     toggle_forwarding "on" || { log_error "Failed to enable IP forwarding"; exit 1; }
     
-    # Setup firewall rules
-    setup_firewall || exit 1
+    # Set up firewall rules
+    setup_firewall || { log_error "Failed to configure firewall"; exit 1; }
     
-    # Setup additional interfaces, configure dnsmasq(dhcp server) and hostapd
-    log_info "==== SETTING UP ADDITIONAL NETWORK INTERFACES ===="
-    setup_interfaces_and_services
-
     # Setup initial routing
-    setup_initial_routing || exit 1
+    setup_initial_routing || { log_error "Failed to configure initial routing"; exit 1; }
+    
+    # Log successful setup
+    log_info "==== SETTING UP ADDITIONAL NETWORK INTERFACES ===="
+    
+    # Setup additional network interfaces and services
+    setup_interfaces_and_services
+    
+    # Log successful completion
+    log_info "==== MESH NETWORK SETUP ===="
+    
+    # Start monitoring service in a background loop for auto mode
+    log_info "==== MESH NETWORK SETUP COMPLETE ===="
+    
+    # Start monitoring service
+    log_info "==== STARTING MONITORING SERVICE ===="
+    
+    log_info "Starting monitor with auto mode enabled"
+    monitor_mesh_network
 }
 
 
