@@ -81,15 +81,49 @@ fi
 if [ -z "${MAC_TO_SET}" ]; then
     echo "Info: Generating new random locally administered MAC address for ${TARGET_IFACE}..."
 
-    # Generate 5 random bytes, convert to hex
-    MAC_SUFFIX=$(head -c 5 /dev/urandom | od -An -t x1 | tr -d ' \n')
+    # Generate 5 random bytes (10 hex characters) for the suffix
+    MAC_SUFFIX=$(head -c 5 /dev/urandom | od -An -t x1 | tr -d ' \\n')
 
-    # Combine with prefix '02' and format
-    GENERATED_MAC=$(printf "02:%s" "${MAC_SUFFIX}" | sed 's/\(..\)/\1:/g; s/:$//')
+    # Check if MAC_SUFFIX has the expected length (10 hex chars)
+    if [ ${#MAC_SUFFIX} -ne 10 ]; then
+        echo "Error: Failed to generate enough random data for MAC suffix. Got: '${MAC_SUFFIX}'" >&2
+        exit 4 # Use the defined exit code for generation failure
+    fi
+
+    # Combine with prefix '02' and format correctly into 6 octets
+    # Example: prefix 02, suffix aabbccddee -> 02:aa:bb:cc:dd:ee
+    # The sed command splits the 10-char suffix into 5 space-separated 2-char arguments for printf
+    # Pipe through tr to remove any potential trailing whitespace/newline from command substitution
+    GENERATED_MAC=$(printf "02:%s:%s:%s:%s:%s" $(echo "$MAC_SUFFIX" | sed 's/\(..\)/\1 /g') | tr -d '[:space:]')
+
 
     # Validate generated MAC format
-    if ! [[ "${GENERATED_MAC}" =~ ^02:([0-9A-Fa-f]{2}:){4}[0-9A-Fa-f]{2}$ ]]; then
-       echo "Error: Failed to generate a valid random MAC address for ${TARGET_IFACE}." >&2
+    is_valid=true
+    # Check prefix
+    if [[ "${GENERATED_MAC#02:}" == "${GENERATED_MAC}" ]]; then
+        echo "Validation Error: MAC does not start with 02:" >&2
+        is_valid=false
+    fi
+    # Check length (17 characters: 12 hex + 5 colons)
+    if [[ ${#GENERATED_MAC} -ne 17 ]]; then
+        echo "Validation Error: MAC length is not 17 characters (${#GENERATED_MAC})" >&2
+        is_valid=false
+    fi
+    # Check character set (stripping colons, should only be hex digits 0-9, A-F, a-f)
+    mac_digits_only=${GENERATED_MAC//:/}
+    if [[ "$mac_digits_only" =~ [^0-9A-Fa-f] ]]; then
+        echo "Validation Error: MAC contains invalid characters (non-hex digits)" >&2
+        is_valid=false
+    fi
+    # Check number of colons (should be 5)
+    num_colons=$(tr -dc ':' <<< "$GENERATED_MAC" | wc -c)
+    if [[ $num_colons -ne 5 ]]; then
+        echo "Validation Error: MAC has incorrect number of colons ($num_colons)" >&2
+        is_valid=false
+    fi
+
+    if ! $is_valid; then
+       echo "Error: Failed to generate a valid random MAC address for ${TARGET_IFACE}. Generated: '${GENERATED_MAC}'" >&2
        exit 4
     fi
 
