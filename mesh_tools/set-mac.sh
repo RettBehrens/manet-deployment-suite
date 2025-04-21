@@ -185,16 +185,6 @@ if $IFACE_EXISTS; then
     fi
     sleep 1 # Give it a moment
 
-    # Bring interface up
-    echo "Info: Bringing interface ${TARGET_IFACE} up..."
-    ip link set dev "${TARGET_IFACE}" up
-     if [ $? -ne 0 ]; then
-        # This is less critical, maybe the system brings it up later. Log warning.
-        echo "Warn: Failed to bring interface ${TARGET_IFACE} back up after setting MAC." >&2
-        # Still exit 0 because the MAC *was* set.
-        exit 0
-    fi
-
     echo "Info: Successfully set MAC address for ${TARGET_IFACE} to ${MAC_TO_SET}."
     exit 0 # Success
 
