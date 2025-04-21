@@ -1,141 +1,175 @@
 #!/bin/bash
 
-# This script generates a unique, persistent MAC address for the MESH_IFACE
-# based on the system hostname and stores it for persistence.
-# It should be run *before* mesh-network.sh starts configuring batman-adv.
+# This script generates/retrieves a unique, persistent locally administered
+# MAC address for a given network interface and stores it for persistence.
+# It attempts to apply the MAC address only if the interface exists.
+#
+# Usage: set-mac.sh <interface_name>
+#
+# Exit Codes:
+#   0: Success (MAC stored, applied if interface exists)
+#   1: Invalid usage (missing argument)
+#   2: Not run as root
+#   3: Failed to create storage directory
+#   4: Failed to generate a valid MAC address
+#   5: Failed to write MAC to storage file
+#   6: Failed to apply MAC address (interface exists but application failed)
 
-# This script was created for the event that multiple nodes are using the same WiFi adapters for the mesh network that also employ the same mac address.
-# NOTE: When run via systemd service, MESH_IFACE is expected to be set as an environment variable by the EnvironmentFile directive.
-
-set -e
-set -o pipefail
+set -o pipefail # Keep pipefail, but remove set -e for custom exit codes
 
 # --- Configuration ---
-# CONFIG_FILE="mesh-config.conf" # Not needed when run via systemd with EnvironmentFile
 MAC_STORAGE_DIR="/var/lib/batman-adv"
-MAC_STORAGE_FILE="${MAC_STORAGE_DIR}/mesh_iface_mac"
-LOG_PREFIX="[set-mesh-mac]"
 
-# --- Logging ---
-log_info() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ${LOG_PREFIX} INFO: $1"
-}
-
-log_warn() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ${LOG_PREFIX} WARN: $1" >&2
-}
-
-log_error() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ${LOG_PREFIX} ERROR: $1" >&2
+# --- Input Validation ---
+if [ -z "$1" ]; then
+  echo "Usage: $0 <interface_name>" >&2
+  exit 1
+fi
+TARGET_IFACE="$1"
+# Basic validation for interface name (alphanumeric, hyphen, underscore)
+if ! [[ "$TARGET_IFACE" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: Invalid interface name provided: $TARGET_IFACE" >&2
     exit 1
-}
+fi
+MAC_STORAGE_FILE="${MAC_STORAGE_DIR}/${TARGET_IFACE}_la_mac" # la = locally administered
 
 # --- Ensure script is run as root ---
 if [ "$(id -u)" -ne 0 ]; then
-  log_error "This script must be run as root (or with sudo)."
-fi
-
-# --- Check for MESH_IFACE environment variable ---
-if [ -z "${MESH_IFACE}" ]; then
-    # Added a fallback to try sourcing if not run via systemd, but log a warning.
-    CONFIG_FILE_PATH="/etc/mesh-network/mesh-config.conf" # Default path if not run by service
-    if [ -f "${CONFIG_FILE_PATH}" ]; then
-        log_warn "MESH_IFACE not found in environment. Attempting to source from ${CONFIG_FILE_PATH}. Recommended to run via systemd service."
-        source "${CONFIG_FILE_PATH}"
-    fi
-    # Final check
-    if [ -z "${MESH_IFACE}" ]; then
-        log_error "MESH_IFACE variable not set in environment or config file."
-    fi
-fi
-
-log_info "Using mesh interface: ${MESH_IFACE}"
-
-if ! ip link show "${MESH_IFACE}" > /dev/null 2>&1; then
-    log_error "Mesh interface specified does not exist: ${MESH_IFACE}"
+  echo "Error: This script must be run as root (or with sudo)." >&2
+  exit 2
 fi
 
 # --- MAC Address Generation/Retrieval ---
 
 # Ensure storage directory exists
-log_info "Checking MAC storage directory: ${MAC_STORAGE_DIR}"
-mkdir -p "${MAC_STORAGE_DIR}" || log_error "Failed to create directory ${MAC_STORAGE_DIR}"
-chmod 755 "${MAC_STORAGE_DIR}" || log_warn "Could not set permissions on ${MAC_STORAGE_DIR}"
+# Use -p to avoid error if exists, check command success
+mkdir -p "${MAC_STORAGE_DIR}"
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to create directory ${MAC_STORAGE_DIR}" >&2
+    exit 3
+fi
+# Set permissions (best effort)
+chmod 755 "${MAC_STORAGE_DIR}" 2>/dev/null
 
 MAC_TO_SET=""
 STORED_MAC=""
 
 # Check if MAC file exists and is valid
 if [ -f "${MAC_STORAGE_FILE}" ]; then
-    log_info "Found stored MAC file: ${MAC_STORAGE_FILE}"
     # Read content and validate format
     STORED_MAC=$(cat "${MAC_STORAGE_FILE}")
     if [[ "${STORED_MAC}" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
         # Validate it's a locally administered address (starts with 02, 06, 0A, 0E)
         FIRST_OCTET=$(echo "${STORED_MAC}" | cut -d: -f1)
-        if [[ "${FIRST_OCTET^^}" =~ ^(02|06|0A|0E)$ ]]; then # Added ^^ for case-insensitivity
-             log_info "Using valid stored MAC address: ${STORED_MAC}"
+        if [[ "${FIRST_OCTET^^}" =~ ^(02|06|0A|0E)$ ]]; then
+             # Use echo for info output, >&2 for non-critical warnings
+             echo "Info: Using valid stored MAC address for ${TARGET_IFACE}: ${STORED_MAC}"
              MAC_TO_SET="${STORED_MAC}"
         else
-            log_warn "Stored MAC (${STORED_MAC}) is not a valid locally administered address (must start 02, 06, 0A, or 0E). Regenerating."
+            echo "Warn: Stored MAC (${STORED_MAC}) for ${TARGET_IFACE} is not a valid locally administered address. Regenerating." >&2
             STORED_MAC="" # Invalidate stored MAC
         fi
     else
-        log_warn "Stored MAC file (${MAC_STORAGE_FILE}) contains invalid data: ${STORED_MAC}. Regenerating."
+        echo "Warn: Stored MAC file (${MAC_STORAGE_FILE}) contains invalid data: ${STORED_MAC}. Regenerating." >&2
         STORED_MAC="" # Invalidate stored MAC
     fi
 else
-    log_info "Stored MAC file not found. Will generate a new MAC."
+    echo "Info: Stored MAC file for ${TARGET_IFACE} not found. Will generate a new MAC."
 fi
 
 # Generate MAC if needed
 if [ -z "${MAC_TO_SET}" ]; then
-    log_info "Generating new random locally administered MAC address..."
+    echo "Info: Generating new random locally administered MAC address for ${TARGET_IFACE}..."
 
-    # Generate 10 random hexadecimal characters for the suffix
-    # Read 5 bytes from /dev/urandom, convert to hex (x1), remove spaces/newlines
+    # Generate 5 random bytes, convert to hex
     MAC_SUFFIX=$(head -c 5 /dev/urandom | od -An -t x1 | tr -d ' \n')
 
-    # Combine with prefix '02' for locally administered address and format
-    GENERATED_MAC=$(echo "02${MAC_SUFFIX}" | sed 's/\(..\)/\1:/g; s/:$//')
+    # Combine with prefix '02' and format
+    GENERATED_MAC=$(printf "02:%s" "${MAC_SUFFIX}" | sed 's/\(..\)/\1:/g; s/:$//')
 
-    # Very basic check if generation somehow failed (unlikely)
-    if ! [[ "${GENERATED_MAC}" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
-       log_error "Failed to generate a valid random MAC address."
+    # Validate generated MAC format
+    if ! [[ "${GENERATED_MAC}" =~ ^02:([0-9A-Fa-f]{2}:){4}[0-9A-Fa-f]{2}$ ]]; then
+       echo "Error: Failed to generate a valid random MAC address for ${TARGET_IFACE}." >&2
+       exit 4
     fi
 
-    log_info "Generated MAC: ${GENERATED_MAC}"
+    echo "Info: Generated MAC for ${TARGET_IFACE}: ${GENERATED_MAC}"
     MAC_TO_SET="${GENERATED_MAC}"
 
     # Save the generated MAC
-    log_info "Saving generated MAC to ${MAC_STORAGE_FILE}"
-    echo "${GENERATED_MAC}" > "${MAC_STORAGE_FILE}" || log_error "Failed to write MAC to ${MAC_STORAGE_FILE}"
-    chmod 644 "${MAC_STORAGE_FILE}" || log_warn "Could not set permissions on ${MAC_STORAGE_FILE}"
+    echo "Info: Saving generated MAC to ${MAC_STORAGE_FILE}"
+    # Use printf to avoid issues with echo interpretation, check command success
+    printf "%s\n" "${GENERATED_MAC}" > "${MAC_STORAGE_FILE}"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to write MAC to ${MAC_STORAGE_FILE}" >&2
+        # Attempt to clean up the possibly corrupted file
+        rm -f "${MAC_STORAGE_FILE}" 2>/dev/null
+        exit 5
+    fi
+    # Set permissions (best effort)
+    chmod 644 "${MAC_STORAGE_FILE}" 2>/dev/null
 fi
 
-# --- Apply MAC Address ---
-CURRENT_MAC=$(ip -o link show "${MESH_IFACE}" | awk '{print $17}')
+# --- Apply MAC Address (only if interface exists) ---
+IFACE_EXISTS=false
+if ip link show "${TARGET_IFACE}" > /dev/null 2>&1; then
+    IFACE_EXISTS=true
+fi
 
-if [ "${CURRENT_MAC,,}" == "${MAC_TO_SET,,}" ]; then # Added ,, for case-insensitive comparison
-    log_info "Current MAC address (${CURRENT_MAC}) already matches target (${MAC_TO_SET}). No change needed."
-else
-    log_info "Applying MAC address ${MAC_TO_SET} to interface ${MESH_IFACE}..."
+if $IFACE_EXISTS; then
+    echo "Info: Interface ${TARGET_IFACE} exists. Attempting to apply MAC address ${MAC_TO_SET}..."
+    CURRENT_MAC=$(ip -o link show "${TARGET_IFACE}" | awk '{print $17}') # Assuming MAC is 17th field
+
+    if [ -z "${CURRENT_MAC}" ]; then
+        echo "Warn: Could not determine current MAC for ${TARGET_IFACE}. Attempting to set anyway." >&2
+        # Proceed to set logic below
+    elif [ "${CURRENT_MAC,,}" == "${MAC_TO_SET,,}" ]; then # Case-insensitive comparison
+        echo "Info: Current MAC address (${CURRENT_MAC}) already matches target (${MAC_TO_SET}). No change needed."
+        exit 0 # Successful exit, no change needed
+    fi
+
+    echo "Info: Applying MAC address ${MAC_TO_SET} to interface ${TARGET_IFACE}..."
 
     # Bring interface down
-    log_info "Bringing interface ${MESH_IFACE} down..."
-    ip link set dev "${MESH_IFACE}" down || log_error "Failed to bring interface ${MESH_IFACE} down."
+    echo "Info: Bringing interface ${TARGET_IFACE} down..."
+    ip link set dev "${TARGET_IFACE}" down
+    if [ $? -ne 0 ]; then
+         echo "Error: Failed to bring interface ${TARGET_IFACE} down. MAC not applied." >&2
+         # Exit with error code 6, MAC was generated/stored but not applied
+         exit 6
+    fi
     sleep 1 # Give it a moment
 
     # Set MAC address
-    log_info "Setting MAC address..."
-    ip link set dev "${MESH_IFACE}" address "${MAC_TO_SET}" || log_error "Failed to set MAC address ${MAC_TO_SET} on ${MESH_IFACE}."
+    echo "Info: Setting MAC address..."
+    ip link set dev "${TARGET_IFACE}" address "${MAC_TO_SET}"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to set MAC address ${MAC_TO_SET} on ${TARGET_IFACE}." >&2
+        # Attempt to bring interface back up before exiting
+        ip link set dev "${TARGET_IFACE}" up 2>/dev/null
+        exit 6
+    fi
     sleep 1 # Give it a moment
 
     # Bring interface up
-    log_info "Bringing interface ${MESH_IFACE} up..."
-    ip link set dev "${MESH_IFACE}" up || log_error "Failed to bring interface ${MESH_IFACE} up."
+    echo "Info: Bringing interface ${TARGET_IFACE} up..."
+    ip link set dev "${TARGET_IFACE}" up
+     if [ $? -ne 0 ]; then
+        # This is less critical, maybe the system brings it up later. Log warning.
+        echo "Warn: Failed to bring interface ${TARGET_IFACE} back up after setting MAC." >&2
+        # Still exit 0 because the MAC *was* set.
+        exit 0
+    fi
 
-    log_info "Successfully set MAC address for ${MESH_IFACE} to ${MAC_TO_SET}."
+    echo "Info: Successfully set MAC address for ${TARGET_IFACE} to ${MAC_TO_SET}."
+    exit 0 # Success
+
+else
+    echo "Info: Interface ${TARGET_IFACE} does not exist. MAC address (${MAC_TO_SET}) stored in ${MAC_STORAGE_FILE} for later use."
+    # Exit 0 because the primary goal (generating/storing) was successful.
+    # The calling script needs to handle the case where the interface doesn't exist yet.
+    exit 0
 fi
 
+# Should not be reached, but ensure exit 0 if somehow it is
 exit 0 

@@ -1464,7 +1464,24 @@ setup_firewall() {
 # Setup batman-adv interface
 setup_batman_interface() {
     log_info "Setting up wireless interface ${MESH_IFACE} for batman-adv"
-    
+
+    # --- Set Locally Administered MAC for MESH_IFACE ---
+    log_info "Ensuring persistent MAC address for ${MESH_IFACE}..."
+    # Capture output for logging, but don't let it clutter the main log unless erroring
+    local mac_output
+    if ! mac_output=$(/usr/sbin/set-mac.sh "${MESH_IFACE}" 2>&1); then
+        local exit_code=$?
+        log_error "Failed to set/store MAC address for ${MESH_IFACE} (Exit Code: ${exit_code}). Output:"
+        # Log the captured output on error
+        while IFS= read -r line; do log_error "  ${line}"; done <<< "$mac_output"
+        return 1 # Fatal error if physical interface MAC cannot be set
+    else
+        # Log success output at debug level
+        while IFS= read -r line; do log_debug "  [set-mesh-mac] ${line}"; done <<< "$mac_output"
+        log_info "Successfully processed MAC address for ${MESH_IFACE}."
+    fi
+    # --- End MAC Setting ---
+
     log_debug "Disabling NetworkManager for ${MESH_IFACE}"
     nmcli device set "${MESH_IFACE}" managed no
     sleep 0.5
@@ -1531,6 +1548,20 @@ setup_batman_interface() {
         log "Waiting for bat0... attempt $i"
         sleep 0.5
     done
+
+    # --- Set Locally Administered MAC for bat0 ---
+    # Do this *after* bat0 exists but *before* bringing it up/assigning IP
+    log_info "Ensuring persistent MAC address for bat0..."
+    if ! mac_output=$(/usr/sbin/set-mac.sh bat0 2>&1); then
+        local exit_code=$?
+        log_error "Failed to set/store MAC address for bat0 (Exit Code: ${exit_code}). Output:"
+        while IFS= read -r line; do log_error "  ${line}"; done <<< "$mac_output"
+        return 1 # Also treat bat0 MAC failure as fatal
+    else
+        while IFS= read -r line; do log_debug "  [set-mesh-mac] ${line}"; done <<< "$mac_output"
+        log_info "Successfully processed MAC address for bat0."
+    fi
+    # --- End MAC Setting ---
 
     log "Setting bat0 up"
     ip link set up dev bat0

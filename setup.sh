@@ -51,14 +51,14 @@ fi
 cp mesh_tools/mesh-network.service /etc/systemd/system/
 cp mesh_tools/mesh-network.sh /usr/sbin/
 cp mesh_tools/mesh-network-stop.sh /usr/sbin/
-cp mesh_tools/set-mesh-mac.sh /usr/sbin/
+cp mesh_tools/set-mac.sh /usr/sbin/
 
 # Set permissions
 echo "Setting permissions..."
 chmod 644 /etc/systemd/system/mesh-network.service
 chmod +x /usr/sbin/mesh-network.sh
 chmod +x /usr/sbin/mesh-network-stop.sh
-chmod +x /usr/sbin/set-mesh-mac.sh
+chmod +x /usr/sbin/set-mac.sh
 
 # Reload systemd to recognize new service
 systemctl daemon-reload > /dev/null 2>&1

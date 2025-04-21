@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStartPre=/usr/sbin/set-mesh-mac.sh
+# ExecStartPre=/usr/sbin/set-mac.sh # Removed: Now called internally by mesh-network.sh
 ExecStart=/usr/sbin/mesh-network.sh service
 ExecStop=/usr/sbin/mesh-network-stop.sh
 Restart=on-failure
