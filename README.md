@@ -68,7 +68,7 @@ Common applications include:
 - Debian-based Linux distribution (Debian, Ubuntu, Raspberry Pi OS)
 - Required packages:
   ```bash
-  sudo apt install batctl iw wireless-tools net-tools bridge-utils iptables dnsmasq hostapd arping arp-scan
+  sudo apt install batctl iw wireless-tools network-manager net-tools bridge-utils iptables dnsmasq hostapd arping arp-scan bc
   ```
 
 ### Network Planning
@@ -97,7 +97,7 @@ Before deployment, consider:
 sudo apt update && sudo apt upgrade -y
 
 # Install dependencies
-sudo apt install -y git batctl iw wireless-tools net-tools bridge-utils iptables dnsmasq hostapd arping arp-scan
+sudo apt install -y git batctl iw wireless-tools net-tools bridge-utils iptables dnsmasq hostapd arp-scan
 
 # Clone repository
 git clone https://github.com/ifHoncho/manet-deployment-suite.git

@@ -55,6 +55,7 @@ setup_logging() {
     }
     
     # Check if running as a service
+    # It is always running as a service. Occurances of this check need to be looked into and factored out.
     if [ "${1}" = "service" ]; then
         # Redirect output to log file without tee when running as a service
         exec 1>> "${LOG_FILE}"
@@ -330,30 +331,6 @@ setup_nat_for_mode() {
     return 0
 }
 
-# Toggle IP forwarding
-toggle_forwarding() {
-    local state="$1"  # on or off
-    
-    if [ "$state" = "on" ]; then
-        if ! sysctl -w net.ipv4.ip_forward=1 >/dev/null; then
-            log_error "Failed to enable IP forwarding"
-            return 1
-        fi
-        log_debug "IP forwarding enabled"
-    elif [ "$state" = "off" ]; then
-        if ! sysctl -w net.ipv4.ip_forward=0 >/dev/null; then
-            log_error "Failed to disable IP forwarding"
-            return 1
-        fi
-        log_debug "IP forwarding disabled"
-    else
-        log_error "Invalid forwarding state: $state"
-        return 1
-    fi
-    
-    return 0
-}
-
 # Get default gateway for interface
 get_interface_gateway() {
     local interface="$1"
@@ -603,19 +580,37 @@ TRANSLATION_TABLE_MAX_AGE=3600  # Maximum age of entries in seconds (1 hour)
 # Initialize translation table
 init_translation_table() {
     # Create directory with sudo if it doesn't exist
-    sudo mkdir -p "$(dirname "${TRANSLATION_TABLE_FILE}")" 2>/dev/null || true
+    if ! sudo mkdir -p "$(dirname "${TRANSLATION_TABLE_FILE}")"; then
+        log_error "Failed to create directory $(dirname "${TRANSLATION_TABLE_FILE}")"
+        return 1
+    fi
     
     # Create file with sudo if it doesn't exist and set permissions
     if [ ! -f "${TRANSLATION_TABLE_FILE}" ]; then
-        sudo touch "${TRANSLATION_TABLE_FILE}" 2>/dev/null || true
-        sudo chmod 666 "${TRANSLATION_TABLE_FILE}" 2>/dev/null || true
+        if ! sudo touch "${TRANSLATION_TABLE_FILE}"; then
+            log_error "Failed to create translation table file ${TRANSLATION_TABLE_FILE}"
+            return 1
+        fi
+        if ! sudo chmod 666 "${TRANSLATION_TABLE_FILE}"; then
+             log_error "Failed to set permissions on translation table file ${TRANSLATION_TABLE_FILE}"
+             return 1
+        fi
     fi
     
-    # Verify we can write to the file
+    # Verify we can write to the file (as the script user, may not be needed if always using sudo?)
+    # Re-evaluate if this check is necessary as sudo is used for modifications
     if [ ! -w "${TRANSLATION_TABLE_FILE}" ]; then
-        log "Warning: Cannot write to translation table file"
-        return 1
+        # Attempt to fix permissions again, just in case
+        sudo chmod 666 "${TRANSLATION_TABLE_FILE}" 2>/dev/null
+        if [ ! -w "${TRANSLATION_TABLE_FILE}" ]; then
+            log_warn "Warning: Cannot write to translation table file ${TRANSLATION_TABLE_FILE}"
+            # Consider if this should be a fatal error depending on script logic
+            # return 1 
+        fi
     fi
+    
+    log_debug "Translation table directory and file initialized."
+    return 0
 }
 
 # Add or update entry in translation table
@@ -651,7 +646,18 @@ clean_translation_table() {
         fi
     done < "${TRANSLATION_TABLE_FILE}"
     
-    mv "${temp_file}" "${TRANSLATION_TABLE_FILE}"
+    # Use sudo mv to ensure permissions
+    if ! sudo mv "${temp_file}" "${TRANSLATION_TABLE_FILE}"; then
+        log_error "Failed to move temporary file to ${TRANSLATION_TABLE_FILE}"
+        rm -f "${temp_file}" # Clean up temp file on failure
+        return 1
+    fi
+    
+    # Ensure permissions are correct after move
+    sudo chmod 666 "${TRANSLATION_TABLE_FILE}" 2>/dev/null || log_warn "Could not set final permissions on translation table."
+    
+    log_debug "Translation table cleaned successfully."
+    return 0
 }
 
 #######################################
@@ -683,6 +689,7 @@ validate_config() {
     fi
     
     # Set auto mode always - no user configuration needed
+    # We need to be careful here since 'auto' is not an actual batman gateway mode. Only server & client are. This is obviously used to determine the fact that the program will automatically switch between the two but this should be the default. This variable should not be needed.
     BATMAN_GW_MODE="auto"
     log_info "Using auto mode: server when WAN is available, client when unavailable"
 }
@@ -754,6 +761,7 @@ monitor_gateway() {
 }
 
 # Function to detect gateway IP
+# Scans network for IPs, gets vmac from each IP with 'batctl translate $ip', matches it with vmac from 'batctl gwl -n'
 detect_gateway_ip() {
     # Redirect debug output to stderr
     log_debug "Starting gateway detection" >&2
@@ -1006,10 +1014,7 @@ get_valid_interfaces() {
     log_info "Validating network interfaces..."
     
     # Check WAN interfaces with more detailed validation
-    if ip link show "${WAN_IFACE}" >/dev/null 2>&1 && [ -n "${WAN_IFACE}" ]; then
-        VALID_WAN="${WAN_IFACE}"
-        log_info "Found WAN interface: ${VALID_WAN}"
-    elif ip link show "${ETH_WAN}" >/dev/null 2>&1 && [ -n "${ETH_WAN}" ]; then
+    if ip link show "${ETH_WAN}" >/dev/null 2>&1 && [ -n "${ETH_WAN}" ]; then
         VALID_WAN="${ETH_WAN}"
         log_info "Found WAN interface: ${VALID_WAN}"
     else
@@ -1362,7 +1367,7 @@ EOF
 setup_firewall() {
     log_info "Setting up firewall rules..."
     
-    # Clean up existing firewall rules, but don't touch routes
+    # Clean up existing firewall rules
     iptables -F || { log_error "Failed to flush iptables rules"; return 1; }
     iptables -t nat -F || { log_error "Failed to flush NAT rules"; return 1; }
     iptables -t mangle -F || { log_error "Failed to flush mangle rules"; return 1; }
@@ -1373,6 +1378,9 @@ setup_firewall() {
     iptables -P OUTPUT ACCEPT || { log_error "Failed to set OUTPUT policy"; return 1; }
     
     # Configure NAT and routing for server mode
+    # Address this/ pin in this
+    # When this gets called, the gw mode is set to 'auto' (note. 'auto' is only a logical config option, the actual batman interface is configured to 'client' by default) (gets defined later then dynamically implemented with different functions).
+    # It would be better if this is the only function that exists in that regard, then it gets called with an arguement to configure for either client or server depending on WAN connectivity status
     if [ "${BATMAN_GW_MODE}" = "server" ] && [ -n "${VALID_WAN}" ]; then
         log_info "Setting up NAT and routing for server mode"
         
@@ -1453,34 +1461,9 @@ setup_firewall() {
     return 0
 }
 
-# Function to configure batman-adv parameters
-setup_batman_params() {
-    log_info "Setting BATMAN-adv parameters"
-    
-    # If BATMAN_GW_MODE is auto, don't set it here - it will be handled by the dynamic routing
-    if [ "${BATMAN_GW_MODE}" != "auto" ]; then
-        if ! batctl gw_mode "${BATMAN_GW_MODE}"; then
-            log_error "Failed to set gateway mode"
-            return 1
-        fi
-    fi
-
-    if ! batctl orig_interval "${BATMAN_ORIG_INTERVAL}"; then
-        log_error "Failed to set originator interval"
-        return 1
-    fi
-
-    if ! batctl hop_penalty "${BATMAN_HOP_PENALTY}"; then
-        log_error "Failed to set hop penalty"
-        return 1
-    fi
-    
-    return 0
-}
-
-# Setup wireless interface for mesh
-setup_wireless_interface() {
-    log_info "Setting up wireless interface ${MESH_IFACE}"
+# Setup batman-adv interface
+setup_batman_interface() {
+    log_info "Setting up wireless interface ${MESH_IFACE} for batman-adv"
     
     log_debug "Disabling NetworkManager for ${MESH_IFACE}"
     nmcli device set "${MESH_IFACE}" managed no
@@ -1525,12 +1508,7 @@ setup_wireless_interface() {
         log_error "Error: Failed to bring up ${MESH_IFACE}"
         return 1
     fi
-    
-    return 0
-}
 
-# Setup batman-adv interface
-setup_batman_interface() {
     log "Setting up batman-adv interface"
     
     log "Adding interface to batman-adv"
@@ -1574,6 +1552,21 @@ setup_batman_interface() {
         log "Error: Failed to add mesh network route"
         return 1
     }
+
+    log_info "Setting BATMAN-adv parameters"
+    # Note: batman gw mode will be set dynamically
+
+    if ! batctl orig_interval "${BATMAN_ORIG_INTERVAL}"; then
+        log_error "Failed to set originator interval"
+        return 1
+    fi
+
+    if ! batctl hop_penalty "${BATMAN_HOP_PENALTY}"; then
+        log_error "Failed to set hop penalty"
+        return 1
+    fi
+    
+    return 0
     
     return 0
 }
@@ -1588,14 +1581,13 @@ setup_initial_routing() {
     local active_wan=""
     
     # Try both potential WAN interfaces
-    for iface in "${VALID_WAN}" "${ETH_WAN}"; do
-        if [ -n "${iface}" ] && check_wan_connectivity "${iface}"; then
-            wan_available=true
-            active_wan="${iface}"
-            log_info "Internet connectivity available via ${active_wan}"
-            break
-        fi
-    done
+    # Removed checking for both 'VALID_WAN' and 'ETH_WAN' since 'ETH_WAN' gets set as 'VALID_WAN' on verify interfaces. Checking for both is not valid at this stage.
+    # Now, 'VALID_WAN' (verified to exist), gets converted to 'ACTIVE_WAN' (verified to have connection)
+    if [ -n "${VALID_WAN}" ] && check_wan_connectivity "${VALID_WAN}"; then
+        wan_available=true
+        active_wan="${VALID_WAN}"
+        log_info "Internet connectivity available via ${active_wan}"
+    fi
     
     # Set initial gateway mode based on WAN availability
     # Only auto-switch if in auto mode
@@ -1742,13 +1734,14 @@ check_requirements() {
     log_info "Checking required tools..."
     
     # Verify required tools
+    # These are the bare minimum; technically this is fine. But for configurations that use LAN clients they will need dnsmasq
     command -v batctl >/dev/null 2>&1 || { log_error "Error: batctl not installed"; return 1; }
     command -v ip >/dev/null 2>&1 || { log_error "Error: ip command not found"; return 1; }
     command -v iwconfig >/dev/null 2>&1 || { log_error "Error: iwconfig not found"; return 1; }
     command -v iptables >/dev/null 2>&1 || { log_error "Error: iptables not found"; return 1; }
     command -v nmcli >/dev/null 2>&1 || { log_error "Error: nmcli not found"; return 1; }
 
-    # Verify interface exists and is wireless
+    # Verify mesh interface exists and is wireless
     ip link show "${MESH_IFACE}" >/dev/null 2>&1 || { log_error "Error: ${MESH_IFACE} interface not found"; return 1; }
     iwconfig "${MESH_IFACE}" 2>/dev/null | grep -q "IEEE 802.11" || { log_error "Error: ${MESH_IFACE} is not a wireless interface"; return 1; }
     
@@ -1855,7 +1848,7 @@ monitor_mesh_network() {
         local current_wan_status=false
         active_wan=""
 
-        # Try both potential WAN interfaces
+        # Try both potential WAN interfaces will set good one to 'active_wan'
         for iface in "${VALID_WAN}" "${ETH_WAN}"; do
             if [ -n "${iface}" ]; then
                 # Make sure interface is up first
@@ -2502,20 +2495,11 @@ setup_mesh_network() {
     # Check requirements
     check_requirements || exit 1
     
-    # Setup wireless interface
-    setup_wireless_interface || exit 1
-    
     # Setup batman-adv interface
     setup_batman_interface || exit 1
 
-    # Set batman-adv parameters
-    setup_batman_params || exit 1
-    
     # Get valid network interfaces
     get_valid_interfaces
-    
-    # Configure routing and firewall
-    log_info "Configuring routing and firewall"
     
     # Log interface status
     if [ -n "${VALID_WAN}" ]; then
@@ -2535,9 +2519,16 @@ setup_mesh_network() {
     else
         log_debug "No Ethernet LAN interface available"
     fi
+
+    # Configure routing and firewall
+    log_info "Configuring routing and firewall rules"
     
     # Enable IP forwarding
-    toggle_forwarding "on" || { log_error "Failed to enable IP forwarding"; exit 1; }
+        if ! sysctl -w net.ipv4.ip_forward=1 >/dev/null; then
+            log_error "Failed to enable IP forwarding"
+            return 1
+        fi
+        log_debug "IP forwarding enabled"
     
     # Set up firewall rules
     setup_firewall || { log_error "Failed to configure firewall"; exit 1; }
@@ -2569,7 +2560,7 @@ setup_mesh_network() {
 trap cleanup EXIT
 
 # Initialize logging
-setup_logging "$1"
+setup_logging
 
 # Run main script
 log_info "==== MESH NETWORK SETUP ===="

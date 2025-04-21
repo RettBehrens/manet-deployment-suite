@@ -11,6 +11,21 @@ echo "Disabling dnsmasq and hostapd from starting automatically..."
 systemctl disable dnsmasq.service > /dev/null 2>&1
 systemctl disable hostapd.service > /dev/null 2>&1
 
+# Disable systemd-resolved
+echo "Disabling systemd-resolved..."
+systemctl stop systemd-resolved
+systemctl disable systemd-resolved
+
+# Enter custom DNS settings
+echo "Entering custom DNS settings..."
+rm /etc/resolv.conf
+echo "nameserver 127.0.0.1" > /etc/resolv.conf
+echo "nameserver 9.9.9.9" >> /etc/resolv.conf
+
+# Add hostname to /etc/hosts
+echo "Adding hostname to /etc/hosts..."
+sed -i "2s/.*/127.0.1.1\t$(hostname)/" /etc/hosts
+
 # Create mesh-network directory
 mkdir -p /etc/mesh-network
 
