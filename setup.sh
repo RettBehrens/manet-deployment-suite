@@ -46,8 +46,7 @@ if [ "${SKIP_CONFIG_COPY}" = false ]; then
     fi
     echo "Copying mesh configuration file..."
     cp mesh_tools/mesh-config.conf /etc/mesh-network/
-else
-    echo "Skipping mesh configuration file copy."
+
 fi
 cp mesh_tools/mesh-network.service /etc/systemd/system/
 cp mesh_tools/mesh-network.sh /usr/sbin/
