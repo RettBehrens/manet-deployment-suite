@@ -64,6 +64,7 @@ chmod +x /usr/sbin/set-mac.sh
 systemctl daemon-reload > /dev/null 2>&1
 
 echo "Setup complete. Files have been moved and permissions set."
+echo
 echo "You can now edit /etc/mesh-network/mesh-config.conf and start the service with:"
 echo "systemctl enable mesh-network.service"
 echo "systemctl start mesh-network.service"
