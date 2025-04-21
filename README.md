@@ -97,7 +97,7 @@ Before deployment, consider:
 sudo apt update && sudo apt upgrade -y
 
 # Install dependencies
-sudo apt install -y git batctl iw wireless-tools net-tools bridge-utils iptables dnsmasq hostapd arp-scan bc macchanger
+sudo apt install -y git batctl iw wireless-tools net-tools bridge-utils iptables dnsmasq hostapd arp-scan bc
 
 # Clone repository
 git clone https://github.com/ifHoncho/manet-deployment-suite.git
