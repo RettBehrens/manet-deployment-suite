@@ -24,7 +24,7 @@ echo "nameserver 9.9.9.9" >> /etc/resolv.conf
 
 # Add hostname to /etc/hosts
 echo "Adding hostname to /etc/hosts..."
-sed -i "2s/.*/127.0.1.1\t$(hostname)/" /etc/hosts
+sed -i "2s/.*/127.0.1.1 $(hostname)/" /etc/hosts
 
 # Create mesh-network directory
 mkdir -p /etc/mesh-network
