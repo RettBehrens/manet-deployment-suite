@@ -90,20 +90,19 @@ fi
 
 # Generate MAC if needed
 if [ -z "${MAC_TO_SET}" ]; then
-    log_info "Generating new MAC address based on machine ID..."
-    MACHINE_ID_FILE="/etc/machine-id"
+    log_info "Generating new random locally administered MAC address..."
 
-    if [ ! -f "${MACHINE_ID_FILE}" ] || [ ! -r "${MACHINE_ID_FILE}" ] || [ ! -s "${MACHINE_ID_FILE}" ]; then
-        log_error "Cannot read valid machine ID from ${MACHINE_ID_FILE}."
-    fi
-
-    MACHINE_ID=$(cat "${MACHINE_ID_FILE}")
-
-    # Generate 10 hex characters from SHA256 hash of machine-id
-    MAC_SUFFIX=$(echo -n "${MACHINE_ID}" | sha256sum | head -c 10)
+    # Generate 10 random hexadecimal characters for the suffix
+    # Read 5 bytes from /dev/urandom, convert to hex (x1), remove spaces/newlines
+    MAC_SUFFIX=$(head -c 5 /dev/urandom | od -An -t x1 | tr -d ' \n')
 
     # Combine with prefix '02' for locally administered address and format
     GENERATED_MAC=$(echo "02${MAC_SUFFIX}" | sed 's/\(..\)/\1:/g; s/:$//')
+
+    # Very basic check if generation somehow failed (unlikely)
+    if ! [[ "${GENERATED_MAC}" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+       log_error "Failed to generate a valid random MAC address."
+    fi
 
     log_info "Generated MAC: ${GENERATED_MAC}"
     MAC_TO_SET="${GENERATED_MAC}"
