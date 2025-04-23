@@ -6,12 +6,39 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# --- Check for required packages ---
+REQUIRED_PACKAGES="batctl iw wireless-tools network-manager net-tools bridge-utils iptables dnsmasq hostapd arping arp-scan bc"
+MISSING_PACKAGES=""
+
+echo "Checking for required packages..."
+for pkg in $REQUIRED_PACKAGES; do
+    if ! dpkg -s "$pkg" > /dev/null 2>&1; then
+        MISSING_PACKAGES="$MISSING_PACKAGES $pkg"
+    fi
+done
+
+if [ -n "$MISSING_PACKAGES" ]; then
+    echo "Error: The following required packages are not installed:"
+    echo " $MISSING_PACKAGES"
+    echo
+    echo "Please install them using the following command:"
+    echo "sudo apt update && sudo apt install -y$MISSING_PACKAGES"
+    exit 1
+else
+    echo "All required packages are installed."
+fi
+echo
+
 # --- Argument Parsing ---
 SKIP_CONFIG_COPY=false
 if [ "$1" == "nc" ] || [ "$1" == "noconfig" ]; then
     echo "Argument '$1' provided: Skipping config file copy."
     SKIP_CONFIG_COPY=true
 fi
+
+# Unmask hostapd service
+echo "Unmasking hostapd.service..."
+systemctl unmask hostapd > /dev/null 2>&1
 
 # Disable dnsmasq and hostapd from starting automatically
 echo "Disabling dnsmasq and hostapd from starting automatically..."
