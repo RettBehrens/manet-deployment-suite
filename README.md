@@ -1,4 +1,4 @@
-# Mobile Ad-Hoc Network (MANET) Deployment Suite
+# Mobile Ad-hoc Network (MANET) Deployment Suite
 
 ## Table of Contents
 - [Introduction](#introduction)
@@ -39,7 +39,7 @@ The system seamlessly bridges meshes with external networks, enabling internet a
 
 ## What is a MANET?
 
-A Mobile Ad-Hoc Network (MANET) is a decentralized type of wireless network that doesn't rely on pre-existing infrastructure. Each node participates in routing by forwarding data to other nodes, and the determination of which nodes forward data is made dynamically based on network connectivity.
+A Mobile Ad-hoc Network (MANET) is a decentralized type of wireless network that doesn't rely on pre-existing infrastructure. Each node participates in routing by forwarding data to other nodes, and the determination of which nodes forward data is made dynamically based on network connectivity.
 
 Key characteristics:
 - Self-forming and self-healing
@@ -65,7 +65,7 @@ Common applications include:
   - SD card/storage (eMMC is highly recommended over an SD card)
 
 ### Software Requirements
-- Debian-based Linux distribution (Debian, Ubuntu, Raspberry Pi OS)
+- This tool is optimized for Ubuntu 22.04. Other Debian-based distributions are supported, but variations in their default network management tools might necessitate configuration adjustments or disabling specific components.
 - Required packages:
   ```bash
   sudo apt install batctl iw wireless-tools network-manager net-tools bridge-utils iptables dnsmasq hostapd arping arp-scan bc
