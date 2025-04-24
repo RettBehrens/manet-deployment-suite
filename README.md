@@ -146,7 +146,7 @@ ETH_LAN_IP=10.10.0.2      # IP for ethernet LAN interface
 MESH_MTU=1500             # MTU size for mesh interface
 BATMAN_ORIG_INTERVAL=1000 # Originator interval (ms)
 BATMAN_HOP_PENALTY=30     # Hop penalty
-BATMAN_ROUTING_ALGORITHM=BATMAN_IV  # BATMAN_IV or BATMAN_V
+BATMAN_ROUTING_ALGORITHM=BATMAN_IV  # BATMAN_IV or BATMAN_V Note that BATMAN_V is only supported in newer versions of batctl
 ```
 
 ### Hardware Interface Management
