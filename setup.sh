@@ -32,6 +32,15 @@ else
 fi
 echo
 
+# Check if rfkill is installed and unblock all devices
+if command -v rfkill &> /dev/null; then
+    echo "rfkill found, unblocking all devices..."
+    rfkill unblock all
+else
+    echo "rfkill not found, skipping unblock step."
+fi
+echo
+
 # --- Argument Parsing ---
 SKIP_CONFIG_COPY=false
 if [ "$1" == "nc" ] || [ "$1" == "noconfig" ]; then
