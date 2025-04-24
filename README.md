@@ -151,7 +151,8 @@ BATMAN_ROUTING_ALGORITHM=BATMAN_IV  # BATMAN_IV or BATMAN_V
 
 ### Hardware Interface Management
 
-It's highly recommended to match interface names to hardware addresses to prevent changes after reboot:
+If you have issues with interface names changing after a reboot, you can create a file in /etc/systemd/network/ and add the following:
+Note that this might cause issues if you try to boot a different interface connected or if you have another tool managing interface names. This will be obvious if the system hangs at boot.
 
 ```bash
 # Create a file like /etc/systemd/network/10-wlan0.link:
@@ -163,9 +164,9 @@ Name=wlan0
 
 ### Network Planning
 For optimal performance, consider:
-1. Each node should have a unique IP address (e.g., follow pattern 10.0.0.x for nodes)
+1. Each node should have a unique IP address (e.g., follow pattern 10.0.0.x for nodes (depending on netmask))
 2. Creating an `/etc/bat-hosts` file with numerical hostnames for easy reference
-3. Access point and LAN networks should use separate subnets (e.g., 10.x0.0.x)
+3. Access point and LAN networks can use separate subnets (e.g., 10.x0.0.x)
 
 ## Service Operation
 
