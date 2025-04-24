@@ -151,11 +151,12 @@ BATMAN_ROUTING_ALGORITHM=BATMAN_IV  # BATMAN_IV or BATMAN_V
 
 ### Hardware Interface Management
 
-If you have issues with interface names changing after a reboot, you can create a file in /etc/systemd/network/ and add the following:
+If you have issues with interface names changing after a reboot, you can create a file in /etc/systemd/network/ and add from the template below.
 Note that this might cause issues if you try to boot a different interface connected or if you have another tool managing interface names. This will be obvious if the system hangs at boot.
 
 ```bash
 # Create a file like /etc/systemd/network/10-wlan0.link:
+# This is an example to set a given interface to wlan0, you can name it whatever though. Just change the filename and Name value under [link]
 [Match]
 MACAddress=xx:xx:xx:xx:xx:xx
 [Link]
