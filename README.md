@@ -70,25 +70,7 @@ Common applications include:
   ```bash
   sudo apt install batctl iw wireless-tools network-manager net-tools bridge-utils iptables dnsmasq hostapd arping arp-scan bc
   ```
-
-### Network Planning
-Before deployment, consider:
-1. **Network Size**
-   - Number of nodes
-   - Expected coverage area
-   - User density
-
-2. **Topology**
-   - Simple mesh (all nodes equal)
-   - Gateway mesh (internet access)
-   - Access point mesh (client access)
-   - Hybrid setup
-
-3. **IP Addressing**
-   - Mesh network range (e.g., 10.0.0.0/24)
-   - AP network range (e.g., 10.20.0.0/24)
-   - WAN configuration
-
+  
 ## Installation
 
 ### System Preparation
