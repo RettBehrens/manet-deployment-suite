@@ -23,6 +23,9 @@ if [ -n "$MISSING_PACKAGES" ]; then
     echo
     echo "Please install them using the following command:"
     echo "sudo apt update && sudo apt install -y$MISSING_PACKAGES"
+    echo
+    echo "If you get an error from dnsmasq saying 'Failed to start up' you can ignore it."
+    echo
     exit 1
 else
     echo "All required packages are installed."
