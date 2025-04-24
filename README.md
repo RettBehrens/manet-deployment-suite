@@ -109,7 +109,9 @@ Most of these can be left as is, the main things you will need to change are the
 # Interface Configuration
 MESH_IFACE=wlan0          # Primary mesh interface
 
-# IP Configuration
+# IP configuration - These must be unique on the network, each node should have a different IP address.
+# Remember to configure IP's within the netmask (eg. for /24, you can only increment the last octet)
+# It is helpful to create an /etc/bat-hosts file with numerical hostnames for each node so you know each IP addresses without having to look it up. (Given that you assign IP's in numerical order)
 NODE_IP=10.0.0.1          # Node IP (must be unique on the network)
 MESH_NETMASK=24           # Network mask (e.g., 24 for /24)
 DNS_SERVERS=9.9.9.9,8.8.8.8,1.1.1.1  # DNS servers to use
@@ -144,7 +146,7 @@ ETH_LAN_IP=10.10.0.2      # IP for ethernet LAN interface
 MESH_MTU=1500             # MTU size for mesh interface
 BATMAN_ORIG_INTERVAL=1000 # Originator interval (ms)
 BATMAN_HOP_PENALTY=30     # Hop penalty
-BATMAN_ROUTING_ALGORITHM=BATMAN_V  # BATMAN_IV or BATMAN_V
+BATMAN_ROUTING_ALGORITHM=BATMAN_IV  # BATMAN_IV or BATMAN_V
 ```
 
 ### Hardware Interface Management
