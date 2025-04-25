@@ -85,7 +85,8 @@ sudo apt install -y git batctl iw wireless-tools net-tools bridge-utils iptables
 git clone https://github.com/ifHoncho/manet-deployment-suite.git
 cd manet-deployment-suite
 
-# Install configuration files
+# Initial Setup
+sudo chmod +x setup.sh
 sudo ./setup.sh
 
 # Edit configuration
