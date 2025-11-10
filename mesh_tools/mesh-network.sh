@@ -1490,6 +1490,15 @@ setup_batman_interface() {
     ip link set down dev "${MESH_IFACE}"
     sleep 0.5
 
+    log_debug "Clearing any existing configuration on ${MESH_IFACE}"
+    nmcli device disconnect "${MESH_IFACE}" >/dev/null 2>&1 || true
+    ip addr flush dev "${MESH_IFACE}" >/dev/null 2>&1 || true
+    ip route flush dev "${MESH_IFACE}" >/dev/null 2>&1 || true
+    ip link set dev "${MESH_IFACE}" nomaster 2>/dev/null || true
+    if command -v dhclient >/dev/null 2>&1; then
+        dhclient -r "${MESH_IFACE}" >/dev/null 2>&1 || true
+    fi
+
     log_info "Loading batman-adv module"
     modprobe batman-adv
     if ! lsmod | grep -q "^batman_adv"; then
